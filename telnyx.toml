@@ -1,0 +1,11 @@
+name = "telnyx-fde"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+[[actors]]
+binding = "COUNTER"
+type = "Counter"
+
+[edge_compute]
+func_id = "0768c5c4-b3f2-49a5-b243-21aa1981725e"
+func_name = "telnyx-fde"
