@@ -79,13 +79,44 @@ export interface Ticket {
 export interface ActorState {
   // Next reference number assigned by createTicket. Monotonic.
   next_ticket_number: number;
-  // All tickets for this caller, oldest-first. The Actor does not trim this
-  // list; only the presentation layer (init handler) selects a subset.
+  // All tickets for this caller, in insertion order. Historical fixtures may
+  // have older dates; the init handler sorts and selects the voice subset.
   tickets: Ticket[];
 }
 
 // The status_summary assigned to a brand-new ticket.
 export const NEW_TICKET_STATUS_SUMMARY = "Awaiting handling.";
+
+// Business input for one actor creation. Caller identity is resolved by the
+// Function before RPC; no phone number belongs in this actor input or state.
+export interface CreateTicketInput {
+  subject: string;
+  description: string;
+  operation_id: string;
+}
+
+// Minimal creation result. A repeated operation returns these same identifiers.
+export type CreateTicketResult = Pick<Ticket, "id" | "reference">;
+
+// Demo-only input. The actor assigns ids and references itself, while fixtures
+// may supply documented statuses and historical timestamps for a voice demo.
+// A stable operation_id identifies a fixture across repeated seed calls.
+export interface DemoTicketInput extends CreateTicketInput {
+  status: TicketStatus;
+  status_summary: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// Explicit batch wrapper used by the preparation-only actor method.
+export interface SeedDemoTicketsInput {
+  tickets: DemoTicketInput[];
+}
+
+// Number of new fixtures inserted; existing operation ids are left untouched.
+export interface SeedDemoTicketsResult {
+  added_count: number;
+}
 
 // ---------------------------------------------------------------------------
 // Dynamic variables exchanged with the AI Assistant

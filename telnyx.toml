@@ -6,6 +6,11 @@ compatibility_date = "2026-05-01"
 binding = "COUNTER"
 type = "Counter"
 
+# Persistent ticket records, isolated by the caller's opaque HMAC key.
+[[actors]]
+binding = "CALLER_TICKETS"
+type = "CallerTickets"
+
 [storage.kv.SUPPORT_CONFIG]
 id = "c73e15c6-ce32-4306-ad0a-192deceb7d0f"
 

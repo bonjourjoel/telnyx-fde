@@ -34,6 +34,10 @@ import { logEvent, STAGE, OUTCOME } from "./logging";
 // exported class name must equal the type).
 export { Counter } from "./counter";
 
+// Ship the caller's ticket actor as well. Step 6 will connect business routes
+// to env.CALLER_TICKETS; the existing HTTP handlers remain unchanged here.
+export { CallerTickets } from "./actors/caller-tickets";
+
 // Header carrying the administration secret. Mirrors ADMIN_SECRET_HEADER in
 // src/security.ts to keep step 4 self-contained; step 6 will centralize this
 // through src/security.ts's verifyAdminSecret helper.
