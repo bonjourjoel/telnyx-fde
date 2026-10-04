@@ -17,6 +17,7 @@ import {
   type SeedDemoTicketsInput,
   type SeedDemoTicketsResult,
   type Ticket,
+  type ResetActorResult,
   type ValidationResult,
 } from "../contracts";
 
@@ -92,9 +93,17 @@ function appendTicket(state: ActorState, input: DemoTicketInput): Ticket {
   return ticket;
 }
 
-// Own all tickets for one caller. Only these three public methods are RPCs;
+// Own all tickets for one caller. Public methods are RPCs;
 // the underscore-prefixed storage helper is excluded by Telnyx RPC dispatch.
 export class CallerTickets extends StatefulActor {
+  // Explicit test administration only. Delete just the business-state key;
+  // the absent-key default restores an empty list and next reference T-0001.
+  // Keep the actor identity and unrelated storage keys. Repetition is harmless.
+  async resetTickets(): Promise<ResetActorResult> {
+    await this.ctx.storage.delete(STATE_KEY);
+    return { ok: true };
+  }
+
   // Read all records. Filtering, ordering, and the voice limit belong to /init.
   async listTickets(): Promise<Ticket[]> {
     const state = await this._readState();

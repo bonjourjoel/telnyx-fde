@@ -5,7 +5,7 @@
 // run repeatedly: it reuses identifiers stored in deployment-state.json and
 // never resets already-created state.
 //
-// Backend, MCP/shared tools, minimal assistant, and phone routing through step 10:
+// Backend, MCP/shared tools, phone routing and ticket follow-up through step 11:
 //   Preflight: typecheck, then the shared full local test suite, before .env.
 //   Runtime credential: validate the org SDK binding; renew only confirmed
 //   invalid/expired tokens on that same resource before storage/secrets/ship.
@@ -39,7 +39,7 @@
 //      every dependency check passes (KV read + three secrets present).
 //  15. Upsert the existing HTTP MCP connection and four shared tools, checkpoint
 //      every id immediately, and verify their definitions and uniqueness.
-//  16. Upsert the assistant and complete minimal workflow using existing ids.
+//  16. Upsert the assistant and complete follow-up workflow using existing ids.
 //  17. Store TeXML, reuse the existing profile, upsert phone routing, assign the
 //      purchased number and read back references without placing a call.
 //  18. Save final deployment metadata and print ids/URLs only.
@@ -742,7 +742,7 @@ async function probeCheckConfig(funcUrl: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  console.log("=== telnyx-fde deploy (through step 10) ===");
+  console.log("=== telnyx-fde deploy (through step 11) ===");
 
   // Fail locally before loading credentials or provisioning any account resource.
   await checkTypeScript();
@@ -854,11 +854,13 @@ async function main(): Promise<void> {
   const sharedTools = await syncSharedTools(getRestApi(), stateStore, tools);
   for (const tool of sharedTools) console.log(JSON.stringify({ operation: "shared_tool_upsert", ...tool }));
 
-  // 16. Keep the approved minimal assistant and Portal test configuration.
+  // 16. Follow-up workflow references existing tools; Portal identity is kept.
   const hangupId = sharedTools.find((tool) => tool.tool === "HANGUP")?.id;
+  const updaterId = sharedTools.find((tool) => tool.tool === "SET_SUPPORT_VARIABLES")?.id;
   if (!hangupId) throw new TelnyxApiError("missing_hangup_tool_id");
+  if (!updaterId) throw new TelnyxApiError("missing_variable_updater_tool_id");
   const assistant = await upsertAssistant(getRestApi(), stateStore,
-    buildAssistant(funcUrl, state.func_name, mcp.server.id, hangupId));
+    buildAssistant(funcUrl, state.func_name, mcp.server.id, { hangup: hangupId, set_support_variables: updaterId }));
   console.log(JSON.stringify({ operation: "assistant_upsert", action: assistant.action, id: assistant.resource.id }));
 
   // 17. Route the physical number with shared checkpoints and verification.
@@ -883,7 +885,7 @@ async function main(): Promise<void> {
   console.log(`MCP id       : ${state.mcp_server_id}.`);
   console.log(`Shared tools : ${sharedTools.length} verified (identifiers saved).`);
   console.log(`Assistant id : ${state.assistant_id}.`);
-  console.log("Workflow     : GREETING -> CONVERSATION -> GOODBYE -> HANGUP.");
+  console.log("Workflow     : GREETING -> ORIENTATION -> TICKET_STATUS / CONVERSATION -> GOODBYE -> HANGUP.");
   console.log(`Voice entry  : ${new URL("/voice-entry", funcUrl).href}`);
   console.log(`Phone id     : ${state.phone_number_id} (number in config/telephony.ts).`);
   console.log(`TeXML app id : ${state.texml_application_id}.`);

@@ -13,6 +13,7 @@ import { MAX_SUBJECT_LENGTH, MAX_DESCRIPTION_LENGTH, type DemoTicketInput, type 
 import type { RuntimeSecrets } from "../src/http/common";
 import { submitDemoFixtures } from "./seed-demo";
 import { prepareSupportConfig } from "../src/support-config";
+import { submitActorReset, resetMode, resetTarget } from "./reset-actor";
 
 // Ephemeral signing keys emulate Telnyx callbacks without using account keys.
 const keys = generateKeyPairSync("ed25519");
@@ -36,6 +37,11 @@ class TestStorage {
   async put<T>(key: string, value: T): Promise<void> {
     if (this.fail) throw new Error("sensitive-storage-error-marker");
     this.values.set(key, structuredClone(value));
+  }
+  // Reset only the requested key and preserve it when storage rejects writes.
+  async delete(key: string): Promise<boolean> {
+    if (this.fail) throw new Error("sensitive-storage-error-marker");
+    return this.values.delete(key);
   }
 }
 
@@ -136,7 +142,7 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.equal((await routeRequest(new Request("https://local.invalid/health"), {} as Env, {})).status, 200);
       assert.equal((await routeRequest(new Request("https://local.invalid/unknown"), {} as Env, {})).status, 404);
       assert.equal((await routeRequest(new Request("https://local.invalid/__proto__"), {} as Env, {})).status, 404);
-      for (const path of ["/init", "/tickets/create", "/admin/seed"]) {
+      for (const path of ["/init", "/tickets/create", "/admin/seed", "/admin/reset-actor"]) {
         const response = await routeRequest(new Request("https://local.invalid" + path), {} as Env, {});
         assert.equal(response.status, 405);
         assert.equal(response.headers.get("Allow"), "POST");
@@ -188,6 +194,10 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.equal(value.tickets_count, 3);
       assert.deepEqual(presented.map((ticket) => ticket.subject), ["newest", "second", "third"]);
       assert.ok(presented.every((ticket) => !("description" in ticket) && !("operation_id" in ticket)));
+      assert.deepEqual(presented.map(ticket => ticket.status_text), [
+        "Ticket T-0003 is open. Synthetic progress.", "Ticket T-0004 is in progress. Synthetic progress.",
+        "Ticket T-0005 is resolved. Synthetic progress.",
+      ]);
       assert.match(value.greeting_text, /3 recent or open tickets/);
       assert.equal((await [...system.actors.values()][0].listTickets()).length, 5);
       const oldOnly = new System();
@@ -509,6 +519,66 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
         assert.ok(!Object.hasOwn(body, "web_demo_identity"));
         return Response.json({ added_count: 1 });
       }), 1);
+    });
+
+    await t.test("protected reset targets the shared Portal actor and leaves real callers intact", async () => {
+      const system = new System();
+      const target = "synthetic-private-portal-target";
+      system.config = { technician_available: false, web_demo_identity: "synthetic-private-web-demo",
+        portal_demo_target_sha256: await computePortalTargetHash(target) };
+      await routeRequest(seedRequest([fixture("phone-ticket")]), system.env, secrets);
+      const webSeed = new Request("https://local.invalid/admin/seed", { method: "POST",
+        headers: { "x-admin-secret": secrets.admin_secret! }, body: JSON.stringify({ conversation_channel: "web_call", tickets: [fixture("demo-ticket")] }) });
+      await routeRequest(webSeed, system.env, secrets);
+      const demoBefore = await variables(await routeRequest(signedRequest("/init", initialization(target)), system.env, secrets));
+      assert.equal(demoBefore.tickets_count, 1);
+      const reset = (body: unknown, admin = secrets.admin_secret) => new Request("https://local.invalid/admin/reset-actor", { method: "POST",
+        headers: { "Content-Type": "application/json", ...(admin ? { "x-admin-secret": admin } : {}) }, body: JSON.stringify(body) });
+      assert.equal((await routeRequest(reset({ conversation_channel: "web_call" }, "wrong-secret"), system.env, secrets)).status, 401);
+      assert.equal((await routeRequest(reset({}, ""), system.env, secrets)).status, 401);
+      assert.equal((await routeRequest(reset({}), system.env, secrets)).status, 400);
+      assert.equal((await routeRequest(reset({ conversation_channel: "phone_call", caller_phone: "anonymous" }), system.env, secrets)).status, 422);
+      assert.equal((await routeRequest(reset({ conversation_channel: "web_call" }), system.env, { ...secrets, admin_secret: undefined })).status, 503);
+      assert.equal((await routeRequest(reset({ conversation_channel: "web_call" }), system.env, { ...secrets, caller_hmac_key: undefined })).status, 503);
+      for (let repeat = 0; repeat < 2; repeat++) {
+        const r = await routeRequest(reset({ conversation_channel: "web_call", caller_phone: PHONE, web_demo_identity: "cannot-select-a-target" }), system.env, secrets);
+        assert.equal(r.status, 200); assert.deepEqual(await r.json(), { ok: true });
+      }
+      const demoAfter = await variables(await routeRequest(signedRequest("/init", initialization(target)), system.env, secrets));
+      assert.equal(demoAfter.tickets_count, 0); assert.equal(demoAfter.init_ok, true);
+      const phoneAfter = await variables(await routeRequest(signedRequest("/init", initialization()), system.env, secrets));
+      assert.equal(phoneAfter.tickets_count, 1);
+      const created = await routeRequest(signedRequest("/tickets/create", { ...creation(demoAfter.operation_id), caller_phone: target }), system.env, secrets);
+      assert.equal((await created.json()).ticket_reference, "T-0001");
+      const demoKey = system.actorKeys.at(-1)!;
+      const beforeFailure = await system.actors.get(demoKey)!.listTickets();
+      system.stores.get(demoKey)!.fail = true;
+      assert.equal((await routeRequest(reset({ conversation_channel: "web_call" }), system.env, secrets)).status, 503);
+      assert.deepEqual(await system.actors.get(demoKey)!.listTickets(), beforeFailure);
+      assert.equal((await routeRequest(reset({ conversation_channel: "phone_call", caller_phone: PHONE }), system.env, secrets)).status, 200);
+      assert.equal((await variables(await routeRequest(signedRequest("/init", initialization()), system.env, secrets))).tickets_count, 0);
+      assert.deepEqual(await system.actors.get(demoKey)!.listTickets(), beforeFailure);
+    });
+
+    await t.test("reset script defaults to demo and requires an explicit private phone target", async () => {
+      const state = { func_url: "https://local.invalid" };
+      assert.equal(resetMode([]), "web_call"); assert.equal(resetMode(["--phone"]), "phone_call");
+      assert.throws(() => resetMode(["--all"])); assert.throws(() => resetMode(["--phone", PHONE]));
+      assert.throws(() => resetTarget({}, "web_call")); assert.throws(() => resetTarget(state, "phone_call"));
+      const target = resetTarget(state, "web_call", { caller_phone: PHONE });
+      assert.deepEqual(target.identity, { conversation_channel: "web_call" });
+      assert.deepEqual(resetTarget(state, "phone_call", { caller_phone: PHONE }).identity, { conversation_channel: "phone_call", caller_phone: PHONE });
+      await submitActorReset(target, secrets.admin_secret!, async (url, options) => {
+        assert.equal(String(url), "https://local.invalid/admin/reset-actor");
+        assert.equal(options?.redirect, "error"); assert.equal(options?.method, "POST");
+        assert.deepEqual(JSON.parse(String(options?.body)), { conversation_channel: "web_call" });
+        assert.equal(new Headers(options?.headers).get("x-admin-secret"), secrets.admin_secret);
+        return Response.json({ ok: true });
+      });
+      await assert.rejects(submitActorReset(target, "", async () => { throw new Error("must not send"); }));
+      await assert.rejects(submitActorReset(target, secrets.admin_secret!, async () => new Response("private-response", { status: 403 })), { status: 403 });
+      await assert.rejects(submitActorReset(target, secrets.admin_secret!, async () => Response.json({ ok: false })));
+      await assert.rejects(submitActorReset(target, secrets.admin_secret!, async () => new Response("not-json")));
     });
 
     await t.test("application logs contain reconstructable events without sensitive values", async () => {

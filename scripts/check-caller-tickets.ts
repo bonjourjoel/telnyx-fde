@@ -17,7 +17,7 @@ import {
 
 // Minimal storage seam; values never share references with the actor or tests.
 // Rejecting put simulates failure before commit, without emulating the runtime.
-class TestStorage implements Pick<ActorStorage, "get" | "put"> {
+class TestStorage implements Pick<ActorStorage, "get" | "put" | "delete"> {
   private readonly values = new Map<string, unknown>();
   writes = 0;
   failWrites = false;
@@ -32,6 +32,14 @@ class TestStorage implements Pick<ActorStorage, "get" | "put"> {
     if (this.failWrites) throw new Error("simulated storage failure");
     this.values.set(key, structuredClone(value));
     this.writes += 1;
+  }
+
+  // Reset failures occur before mutation; unrelated keys stay in storage.
+  async delete(key: string): Promise<boolean> {
+    if (this.failWrites) throw new Error("simulated storage failure");
+    const removed = this.values.delete(key);
+    if (removed) this.writes += 1;
+    return removed;
   }
 }
 
@@ -96,6 +104,31 @@ test("a new actor instance reads existing state and deduplicates a replay", asyn
   assert.equal((await reconstructed.listTickets())[0].subject, "Example subject");
   assert.equal((await reconstructed.createTicket(creation("next-operation"))).reference, "T-0002");
   assert.deepEqual(await actor().listTickets(), []);
+});
+
+// Reset affects one business key, restores numbering and remains repeatable.
+test("explicit reset clears tickets and deduplication while preserving actor identity and unrelated state", async () => {
+  const storage = new TestStorage();
+  const caller = actor(storage);
+  const original = await caller.createTicket(creation());
+  await caller.createTicket(creation("second"));
+  await storage.put("unrelated", { keep: true });
+  assert.deepEqual(await caller.resetTickets(), { ok: true });
+  assert.equal(await storage.get("tickets_state"), undefined);
+  assert.deepEqual(await actor(storage).listTickets(), []);
+  assert.deepEqual(await storage.get("unrelated"), { keep: true });
+  assert.deepEqual(await caller.resetTickets(), { ok: true });
+  const next = await caller.createTicket(creation());
+  assert.equal(next.reference, "T-0001"); assert.notEqual(next.id, original.id);
+});
+
+// A failed deletion never announces success or loses any of the old records.
+test("failed reset preserves ticket storage", async () => {
+  const storage = new TestStorage(); const caller = actor(storage);
+  await caller.createTicket(creation()); const before = await caller.listTickets();
+  storage.failWrites = true;
+  await assert.rejects(caller.resetTickets(), /simulated storage failure/);
+  assert.deepEqual(await actor(storage).listTickets(), before);
 });
 
 // Reject malformed RPC envelopes, empty fields, non-strings, and boundary excesses.

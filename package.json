@@ -7,7 +7,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsx scripts/run-tests.ts",
-    "deploy": "tsx scripts/deploy.ts"
+    "deploy": "tsx scripts/deploy.ts",
+    "resetactor": "tsx scripts/reset-actor.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.3.0",

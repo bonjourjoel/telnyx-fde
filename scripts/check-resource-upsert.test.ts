@@ -157,7 +157,7 @@ test("observed flat tool definition resumes failed verification without POST or 
     tool_definition: {
       name: "SET_SUPPORT_VARIABLES", description: "Update only the listed support conversation inputs.",
       updatable_variables: [
-        { name: "selected_ticket_status_text", type: "string", description: "Copy the selected ticket's known status summary." },
+        { name: "selected_ticket_status_text", type: "string", description: "Copy the selected ticket's exact backend status_text, including its reference and status." },
         { name: "faq_topic_id", type: "string", description: "Store the catalogue topic id returned by list_topics." },
         { name: "faq_long_text", type: "string", description: "Copy the exact long answer returned by the MCP reading tool." },
         { name: "ticket_subject", type: "string", description: "Collect a concise ticket subject without credentials." },

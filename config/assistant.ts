@@ -1,8 +1,8 @@
-// Desired minimal assistant request, including approved text and safe defaults.
+// Desired ticket follow-up assistant request, including safe context defaults.
 // Deployment injects existing resource ids; no credentials or phone values here.
 
 import { DEFAULT_INIT_DYNAMIC_VARIABLES, WRITABLE_DYNAMIC_VARIABLE_KEYS, CREATED_TICKET_VARIABLE_KEYS } from "../src/contracts";
-import { buildMinimalWorkflow, type ConversationFlow } from "./workflow";
+import { buildFollowUpWorkflow, type FollowUpTools, type ConversationFlow } from "./workflow";
 
 // Telnyx documents Kimi-K2.6 as voice-verified; deploy checks account availability.
 // Kokoro and Deepgram Flux use the Telnyx platform without customer provider keys.
@@ -37,11 +37,11 @@ function defaultVariables(): AssistantDefinition["dynamic_variables"] {
 }
 
 // Build JSON from the actual Function URL and already-verified resource ids.
-// The shared HANGUP is the only native tool needed for this minimal workflow.
-export function buildAssistant(functionUrl: string, projectName: string, mcpId: string, hangupToolId: string): AssistantDefinition {
+// Existing shared references attach the updater and hangup without duplication.
+export function buildAssistant(functionUrl: string, projectName: string, mcpId: string, tools: FollowUpTools): AssistantDefinition {
   const base = new URL(functionUrl);
   if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash || base.pathname !== "/" ||
-    !/^[a-zA-Z0-9_-]+$/.test(projectName) || !mcpId.trim() || !hangupToolId.trim()) {
+    !/^[a-zA-Z0-9_-]+$/.test(projectName) || !mcpId.trim()) {
     throw new Error("invalid assistant deployment configuration");
   }
   return {
@@ -50,7 +50,7 @@ export function buildAssistant(functionUrl: string, projectName: string, mcpId: 
     transcription: { ...ASSISTANT_TRANSCRIPTION },
     dynamic_variables_webhook_url: new URL("/init", base).href,
     dynamic_variables_webhook_timeout_ms: INIT_WEBHOOK_TIMEOUT_MS, dynamic_variables: defaultVariables(),
-    mcp_servers: [{ id: mcpId, allowed_tools: [...FAQ_TOOL_NAMES] }], tool_ids: [hangupToolId], tools: [],
-    conversation_flow: buildMinimalWorkflow(hangupToolId),
+    mcp_servers: [{ id: mcpId, allowed_tools: [...FAQ_TOOL_NAMES] }], tool_ids: [tools.hangup, tools.set_support_variables], tools: [],
+    conversation_flow: buildFollowUpWorkflow(tools),
   };
 }

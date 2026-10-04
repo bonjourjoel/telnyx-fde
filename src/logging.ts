@@ -43,6 +43,8 @@ export const STAGE = {
   MCP: "mcp",
   // POST /admin/seed: demo fixture seeding.
   ADMIN_SEED: "admin_seed",
+  // POST /admin/reset-actor: explicitly reset one caller's business state.
+  ADMIN_RESET: "admin_reset",
   // POST /voice-entry: TeXML that starts the assistant.
   VOICE_ENTRY: "voice_entry",
 } as const;

@@ -2,19 +2,13 @@
 // body; the actor validates the whole batch and never overwrites old records.
 
 import type { DemoTicketInput } from "../contracts";
-import { verifyAdminSecret } from "../security";
-import { resolveSupportActorKey } from "../identity";
-import { HttpError, observe, parseObject, requestIdentity, type HttpContext } from "./common";
+import { HttpError, observe, adminJson, adminActorKey, type HttpContext } from "./common";
 
 // Fixtures remain separate from assistant tools and require a usable caller.
 export async function handleSeed(req: Request, context: HttpContext): Promise<Response> {
-  if (!context.secrets.admin_secret) throw new HttpError(503, "administration_unavailable");
-  if (!verifyAdminSecret(req, context.secrets.admin_secret)) throw new HttpError(401, "unauthorized");
-  const body = parseObject(new Uint8Array(await req.arrayBuffer()));
+  const body = await adminJson(req, context);
   if (!Array.isArray(body.tickets)) throw new HttpError(400, "invalid_demo_tickets");
-  if (!context.secrets.caller_hmac_key) throw new HttpError(503, "identity_unavailable");
-  const key = await resolveSupportActorKey(requestIdentity(body), context.env, context.secrets.caller_hmac_key);
-  if (!key) throw new HttpError(422, "caller_identity_unusable");
+  const key = await adminActorKey(body, context);
   try {
     // The cast describes RPC input; actor validation is the authoritative
     // runtime check of every fixture field, before any persistent write.

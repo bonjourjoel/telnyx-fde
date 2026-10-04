@@ -10,6 +10,7 @@ import { handleInit } from "./http/init";
 import { handleCreateTicket } from "./http/create-ticket";
 import { handleSeed } from "./http/seed";
 import { handleVoiceEntry } from "./http/voice-entry";
+import { handleResetActor } from "./http/reset-actor";
 import { runHttp, runtimeSecrets, observe, type HttpContext, type RuntimeSecrets } from "./http/common";
 
 // The exported names match the manifest's actor types. Counter remains deployed
@@ -33,6 +34,7 @@ const ROUTES: Record<string, Route> = {
   "/init": { method: "POST", stage: STAGE.INIT, operation: "initialize", handler: handleInit },
   "/tickets/create": { method: "POST", stage: STAGE.CREATE_TICKET, operation: "create_ticket", handler: handleCreateTicket },
   "/admin/seed": { method: "POST", stage: STAGE.ADMIN_SEED, operation: "seed_demo", handler: handleSeed },
+  "/admin/reset-actor": { method: "POST", stage: STAGE.ADMIN_RESET, operation: "reset_actor", handler: handleResetActor },
   "/voice-entry": { method: "POST", stage: STAGE.VOICE_ENTRY, operation: "voice_entry", handler: handleVoiceEntry },
 };
 

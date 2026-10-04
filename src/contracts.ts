@@ -204,6 +204,8 @@ export interface PresentableTicket {
   subject: string;
   status: TicketStatus;
   status_summary: string;
+  // Backend-formatted status message, copied verbatim by the variable updater.
+  status_text: string;
   updated_at: string;
 }
 
@@ -237,6 +239,10 @@ export type CreateTicketRequest = SupportIdentityRequest & {
 
 // Protected preparation input selects phone or backend-configured web records.
 export type SeedDemoRequest = SupportIdentityRequest & SeedDemoTicketsInput;
+
+// Administration-only reset selects exactly one caller with the shared resolver.
+export type ResetActorRequest = SupportIdentityRequest;
+export interface ResetActorResult { ok: true }
 
 // Success response (HTTP 200). The stored identifiers are mirrored into the
 // conversation as variables by the tool's store_fields_as_variables config.

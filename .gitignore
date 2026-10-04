@@ -7,3 +7,4 @@ deployment-state.json
 
 # Private demo configuration, including the test caller's number.
 seed-demo.local.json
+reset-actor.local.json

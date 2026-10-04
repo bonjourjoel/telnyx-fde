@@ -11,6 +11,9 @@ import { resolveSupportIdentity } from "../identity";
 import { readSupportConfig } from "../support-config";
 import { HttpError, isObject, observe, signedJson, type HttpContext } from "./common";
 
+// Spoken labels are authored by the backend, rather than invented by the model.
+const STATUS_LABELS = { open: "open", in_progress: "in progress", resolved: "resolved" } as const;
+
 // Validate dates rather than silently hiding corrupt records as old tickets.
 // The verbal limit never deletes records and excludes description/operation_id.
 function presentTickets(tickets: Ticket[]): PresentableTicket[] {
@@ -19,13 +22,15 @@ function presentTickets(tickets: Ticket[]): PresentableTicket[] {
     if (!isValidIsoDate(ticket.created_at) || !isValidIsoDate(ticket.updated_at)) {
       throw new HttpError(503, "invalid_ticket_dates");
     }
+    if (!Object.hasOwn(STATUS_LABELS, ticket.status)) throw new HttpError(503, "invalid_ticket_status");
   }
   return tickets
     .filter((ticket) => ticket.status === "open" || Date.parse(ticket.updated_at) >= cutoff)
     .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || a.id.localeCompare(b.id))
     .slice(0, PRESENTABLE_TICKETS_LIMIT)
     .map(({ id, reference, subject, status, status_summary, updated_at }) =>
-      ({ id, reference, subject, status, status_summary, updated_at }));
+      ({ id, reference, subject, status, status_summary, updated_at,
+        status_text: `Ticket ${reference} is ${STATUS_LABELS[status]}. ${status_summary}` }));
 }
 
 // Read the documented envelope. A missing identity/context returns generic

@@ -1025,6 +1025,12 @@ POST /admin/seed
 - Never exposed to the assistant as a tool.
 - Does not replace tickets on every deployment.
 
+POST /admin/reset-actor
+
+- Protected by the same administration secret, never an assistant tool.
+- Explicitly targets one phone caller or the configured Portal demo identity.
+- Deletes only tickets_state in that Actor; deployment never calls this route.
+
   4.2. Conversation variables
 
 ---
@@ -2124,6 +2130,7 @@ Tasks:
 4. Before TICKET_STATUS:
    - Call SET_SUPPORT_VARIABLES.
    - Copy the known status into selected_ticket_status_text.
+   - Copy the backend-provided status_text verbatim, including reference/status.
    - Wait for this update to succeed.
    - Only then follow the transition.
 
@@ -2139,6 +2146,47 @@ Tasks:
    - Briefly explain that tickets could not be retrieved.
    - Allow a new question.
    - Do not announce that the caller's records are empty.
+
+8. Provide npm run resetactor for explicit test administration:
+   - Default target: the backend Portal demo identity.
+   - --phone requires a caller number in ignored reset-actor.local.json.
+   - Authenticate POST /admin/reset-actor with the existing admin secret.
+   - Resolve identity exactly as initialization, creation and fixtures do.
+   - Delete only tickets_state; keep the Actor, unrelated keys and other callers.
+   - The next ticket starts at T-0001. Repeated resets of empty state succeed.
+   - No reset, seeding, new HMAC or identity change during deployment.
+
+Implementation for step 11:
+
+- /init adds a backend-formatted status_text to each presented ticket. Stored
+  ticket records do not change format. Copy the whole text, including reference,
+  status label and progress summary, through SET_SUPPORT_VARIABLES.
+- config/workflow.ts defines GREETING -> ORIENTATION, then ticket status,
+  new-question conversation, cancellation or a status-preparation error. Failed
+  initialization routes to an unavailable Speak message before conversation;
+  successful initialization with no tickets routes directly to conversation.
+  The status Speak reads selected_ticket_status_text and continues to goodbye
+  and hangup. Ambiguous/out-of-range choices remain in the orientation prompt.
+- Expression guards use Telnyx's documented AST and keep their priority:
+  init_ok=false, tickets_count=0, then nonempty selected_ticket_status_text.
+  scripts/lib/assistant.ts preserves that per-source order in read-back checks;
+  node canvas order is immaterial. Never treat guard reordering as equivalent.
+- Attach the existing shared updater and hangup ids. Only ORIENTATION exposes
+  the updater; only selected_ticket_status_text should be written in this step.
+  Check the exact five-variable library allowlist on GET and never resend merged
+  shared definitions inline. tools_mode stays replace; instructions_mode append.
+- scripts/reset-actor.ts reads the Function URL from ignored deployment state
+  and the existing admin secret from the environment. It runs no ship or seed.
+  Unknown flags stop rather than selecting a default reset. Phone targets stay
+  private and never appear in logs or arguments. Use resets between test calls.
+- Backend admin helpers in src/http/common.ts and local scripts/lib/admin-http.ts
+  are reused by seed/reset. The protected reset route calls resetTickets in one
+  serialized Actor turn and announces success only after a successful deletion.
+- docs/test-tickets.md gives the short deploy/reset/seed/Portal sequence. Local
+  tests cover safe reset, instance isolation, failure preservation, counter restart,
+  status formatting and updater/graph reconciliation. They do not run the hosted
+  model or prove conversational selection. Joel performs the Portal smoke test
+  after deployment; real physical calls remain blocked by the account's D61.
 
 Validation:
 

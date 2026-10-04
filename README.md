@@ -574,6 +574,48 @@ Contracts follow [Get Assistant TeXML](https://developers.telnyx.com/api-referen
 [Update Outbound Profile](https://developers.telnyx.com/api-reference/outbound-voice-profiles/updates-an-existing-outbound-voice-profile),
 and the [official OpenAPI schemas](https://github.com/team-telnyx/openapi/blob/master/openapi/spec3.json).
 
+## Ticket follow-up and explicit reset (step 11)
+
+The deployed configuration now adds `ORIENTATION` and `TICKET_STATUS`. The backend
+includes `status_text` in each presented ticket: reference, spoken status label,
+and the stored progress summary. The model selects a ticket by number, reference
+or subject, asks for clarification when needed, and copies that exact text through
+the existing `SET_SUPPORT_VARIABLES` tool. Only then does the Speak node announce
+the status, followed by goodbye and hangup. No follow-up operation changes tickets.
+
+The orientation prompt has only the variable updater. Deterministic expression
+edges prioritize initialization failure, then an empty ticket list, then a filled
+status variable. An initialization failure gets an explicit unavailable message;
+it is never presented as an empty caller history. Updater failure has an error
+branch. New questions use the existing conversation placeholder; FAQ, intake and
+transfer branches remain later work. Instruction mode stays append.
+
+Assistant read-back verifies both shared native tools and the updater's exact
+writable allowlist. It preserves expression-edge priority while tolerating canvas
+node reordering. Complete workflow updates reuse the existing assistant and tool
+ids. Deployment neither resets callers nor loads fixtures.
+
+`npm.cmd run resetactor` runs `scripts/reset-actor.ts` and targets only the
+backend-configured Portal demo. It reads the Function URL from deployment state
+and the admin secret from the environment. Protected `POST /admin/reset-actor`
+uses the same identity resolver as initialization, creation and fixtures, then
+calls `resetTickets()` to delete only `tickets_state`. The instance and unrelated
+keys are preserved; the next ticket starts at `T-0001`. Repeat resets succeed.
+Use the command between calls, not during an active test conversation.
+
+For one real phone caller, `npm.cmd run resetactor -- --phone` requires their
+number in ignored `reset-actor.local.json` (copy the supplied example). No phone
+argument, all-callers mode, or reset/seed hook in deployment is provided. The route
+is never an assistant tool. Fixtures and reset reuse common backend authentication
+and local HTTP helpers; logs report only safe operation/status metadata.
+
+See [test-tickets.md](docs/test-tickets.md) for the short deploy/reset/seed test
+sequence. The local suite checks reset/replay/isolation, counter restart, failures,
+formatted status context, expression precedence, and idempotent assistant updates.
+It does not execute a hosted LLM. Native tool update and spoken ticket selection
+still require a Portal voice test after deployment. Physical inbound calls remain
+blocked by the account-level D61 restriction recorded in AGENTS.md.
+
 ## KV failure diagnosis
 
 The protected `/admin/check-config` includes `kv.error` on a failed read: a fixed

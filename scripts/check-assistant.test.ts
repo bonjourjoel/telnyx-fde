@@ -1,11 +1,11 @@
-// Offline step 9 checks: valid workflow, native request shape, model preflight,
+// Offline assistant checks: follow-up graph, native request shape, model preflight,
 // flat/merged assistant responses, resumable creation and idempotent updates.
 // No environment file, account, real deployment state or phone call is used.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildAssistant, ASSISTANT_MODEL, ASSISTANT_INSTRUCTIONS, INIT_WEBHOOK_TIMEOUT_MS } from "../config/assistant";
-import { buildMinimalWorkflow, validateConversationFlow, CONVERSATION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION } from "../config/workflow";
+import { buildFollowUpWorkflow, validateConversationFlow, CONVERSATION_PROMPT, ORIENTATION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION } from "../config/workflow";
 import { DEFAULT_INIT_DYNAMIC_VARIABLES, WRITABLE_DYNAMIC_VARIABLE_KEYS, CREATED_TICKET_VARIABLE_KEYS } from "../src/contracts";
 import { assertAssistantModelAvailable, upsertAssistant } from "./lib/assistant";
 import { TelnyxApiError, type ApiMethod } from "./lib/telnyx-api";
@@ -13,12 +13,13 @@ import type { DeploymentState, DeploymentStateStore } from "./lib/deployment-sta
 import type { ResourceApi } from "./lib/resource-upsert";
 
 // Fictional resource identities keep fixtures independent of the live account.
-const DEFINITION = buildAssistant("https://function.example.invalid", "telnyx-fde", "mcp-example", "tool-hangup");
+const TOOL_IDS = { hangup: "tool-hangup", set_support_variables: "tool-updater" };
+const DEFINITION = buildAssistant("https://function.example.invalid", "telnyx-fde", "mcp-example", TOOL_IDS);
 
 // Snapshotting store exposes checkpoint loss and preserves previous step ids.
 class Store implements DeploymentStateStore {
   state: DeploymentState = { kv_namespace_id: "kv-existing", mcp_server_id: "mcp-example",
-    shared_tool_ids: { HANGUP: "tool-hangup" }, untouched: true };
+    shared_tool_ids: { HANGUP: "tool-hangup", SET_SUPPORT_VARIABLES: "tool-updater" }, untouched: true };
   // Read detached state as the JSON repository does.
   async load(): Promise<DeploymentState> { return structuredClone(this.state); }
   // No file is written by this double.
@@ -43,7 +44,9 @@ class Registry implements ResourceApi {
     const body = structuredClone(value) as Record<string, unknown>;
     delete body.tool_ids;
     return { ...body, id, version_id: "version-example", created_at: "2026-10-04T00:00:00Z",
-      tools: [{ type: "hangup", hangup: { description: "End the support conversation after the final message." }, shared: true }],
+      tools: [{ type: "hangup", hangup: { description: "End the support conversation after the final message." }, shared: true },
+        { type: "update_dynamic_variables", shared: true, update_dynamic_variables: { name: "SET_SUPPORT_VARIABLES",
+          description: "Update only the listed support conversation inputs.", updatable_variables: WRITABLE_DYNAMIC_VARIABLE_KEYS.map(name => ({ name, type: "string" })) } }],
       external_llm: null, llm_api_key_ref: null,
       telephony_settings: { default_texml_app_id: "texml-auto-example" },
       conversation_flow: { ...DEFINITION.conversation_flow,
@@ -72,7 +75,7 @@ class Registry implements ResourceApi {
     const input = body as typeof DEFINITION;
     assert.ok(!("id" in input) && !("version_id" in input) && !("created_at" in input));
     assert.deepEqual(input.tools, []);
-    assert.deepEqual(input.tool_ids, ["tool-hangup"]);
+    assert.deepEqual(input.tool_ids, ["tool-hangup", "tool-updater"]);
     assert.ok(input.conversation_flow.nodes.every((node) => !("tools" in node) && !("model" in node)));
     if (path === "/ai/assistants") {
       assert.equal(key, this.store.state.assistant_creation_pending?.idempotency_key);
@@ -91,7 +94,7 @@ class Registry implements ResourceApi {
 }
 
 // Approved wording, safe defaults and graph references are checked together.
-test("minimal assistant keeps approved text, webhook defaults and scoped tools", () => {
+test("follow-up assistant keeps greeting/defaults and scopes the updater to orientation", () => {
   assert.equal(DEFINITION.instructions, ASSISTANT_INSTRUCTIONS);
   assert.equal(DEFINITION.greeting, "");
   assert.equal(DEFINITION.dynamic_variables_webhook_url, "https://function.example.invalid/init");
@@ -101,24 +104,32 @@ test("minimal assistant keeps approved text, webhook defaults and scoped tools",
   for (const key of [...WRITABLE_DYNAMIC_VARIABLE_KEYS, ...CREATED_TICKET_VARIABLE_KEYS]) assert.equal(DEFINITION.dynamic_variables[key], "");
   assert.deepEqual(DEFINITION.enabled_features, ["telephony"]);
   assert.deepEqual(DEFINITION.mcp_servers, [{ id: "mcp-example", allowed_tools: ["list_topics", "read_short_answer", "read_long_answer"] }]);
-  assert.equal(DEFINITION.conversation_flow.nodes.length, 4);
-  const prompt = DEFINITION.conversation_flow.nodes.find((node) => node.type === "prompt")!;
+  assert.equal(DEFINITION.conversation_flow.nodes.length, 8);
+  const prompt = DEFINITION.conversation_flow.nodes.find((node) => node.type === "prompt" && node.id === "conversation")!;
+  assert.ok(prompt.type === "prompt");
   assert.equal(prompt.instructions, CONVERSATION_PROMPT);
   assert.equal(prompt.instructions_mode, "append");
   assert.deepEqual(prompt.shared_tool_ids, []);
   assert.equal(prompt.tools_mode, "replace");
   assert.equal(DEFINITION.conversation_flow.nodes[0].type === "speak" && DEFINITION.conversation_flow.nodes[0].message, "{{greeting_text}}");
-  assert.equal(DEFINITION.conversation_flow.nodes[2].type === "speak" && DEFINITION.conversation_flow.nodes[2].message, GOODBYE_MESSAGE);
-  assert.equal(DEFINITION.conversation_flow.edges[1].condition.type === "llm" && DEFINITION.conversation_flow.edges[1].condition.prompt, END_CONVERSATION_CONDITION);
-  assert.throws(() => buildAssistant("http://unsafe.invalid", "telnyx-fde", "mcp", "hangup"));
-  assert.throws(() => buildAssistant("https://safe.invalid", "telnyx-fde", "", "hangup"));
+  const goodbye = DEFINITION.conversation_flow.nodes.find(node => node.id === "goodbye")!;
+  assert.equal(goodbye.type === "speak" && goodbye.message, GOODBYE_MESSAGE);
+  const end = DEFINITION.conversation_flow.edges.find(edge => edge.id === "conversation_to_goodbye")!;
+  assert.equal(end.condition.type === "llm" && end.condition.prompt, END_CONVERSATION_CONDITION);
+  const orientation = DEFINITION.conversation_flow.nodes.find(node => node.id === "orientation")!;
+  assert.equal(orientation.type === "prompt" && orientation.instructions, ORIENTATION_PROMPT);
+  assert.deepEqual(orientation.type === "prompt" && orientation.shared_tool_ids, ["tool-updater"]);
+  assert.ok(!DEFINITION.tool_ids.includes("tool-create-ticket"));
+  assert.throws(() => buildAssistant("http://unsafe.invalid", "telnyx-fde", "mcp", TOOL_IDS));
+  assert.throws(() => buildAssistant("https://safe.invalid", "telnyx-fde", "", TOOL_IDS));
+  assert.throws(() => buildFollowUpWorkflow({ ...TOOL_IDS, set_support_variables: "tool-hangup" }));
 });
 
 // Invalid graphs fail locally, before an API request or any provisioning write.
 test("graph validation rejects missing/duplicate ids, invalid routing and unknown tools", () => {
-  const mutate = (change: (flow: ReturnType<typeof buildMinimalWorkflow>) => void) => {
-    const flow = buildMinimalWorkflow("tool-hangup"); change(flow);
-    assert.throws(() => validateConversationFlow(flow, ["tool-hangup"]));
+  const mutate = (change: (flow: ReturnType<typeof buildFollowUpWorkflow>) => void) => {
+    const flow = buildFollowUpWorkflow(TOOL_IDS); change(flow);
+    assert.throws(() => validateConversationFlow(flow, Object.values(TOOL_IDS)));
   };
   mutate((flow) => { flow.start_node_id = "missing"; });
   mutate((flow) => { flow.nodes[1].id = flow.nodes[0].id; });
@@ -127,7 +138,29 @@ test("graph validation rejects missing/duplicate ids, invalid routing and unknow
   mutate((flow) => { flow.edges[1].condition = { type: "default" }; });
   mutate((flow) => { flow.edges.shift(); });
   mutate((flow) => { flow.edges.pop(); });
-  mutate((flow) => { const node = flow.nodes[3]; if (node.type === "tool") node.shared_tool_id = "unknown"; });
+  mutate((flow) => { const node = flow.nodes.find(node => node.id === "hangup")!; if (node.type === "tool") node.shared_tool_id = "unknown"; });
+  mutate((flow) => { const edge = flow.edges.find(edge => edge.condition.type === "expression")!;
+    if (edge.condition.type === "expression") edge.condition.expression.left.name = "unknown_variable"; });
+});
+
+// Assert routing precedence from the actual graph, not a mirrored builder. These
+// cases prove conditions, not the hosted model's choice or native tool execution.
+test("context and status guards prevent empty or failed-context status delivery", () => {
+  const outgoing = DEFINITION.conversation_flow.edges.filter(edge => edge.start_node_id === "orientation" && edge.condition.type === "expression");
+  const next = (values: Record<string, unknown>) => outgoing.find(edge => {
+    if (edge.condition.type !== "expression") return false;
+    const e = edge.condition.expression;
+    return e.op === "==" ? values[e.left.name] === e.right.value : values[e.left.name] !== e.right.value;
+  })?.target.node_id;
+  assert.equal(next({ init_ok: false, tickets_count: 0, selected_ticket_status_text: "" }), "context_unavailable");
+  assert.equal(next({ init_ok: false, tickets_count: 2, selected_ticket_status_text: "stale" }), "context_unavailable");
+  assert.equal(next({ init_ok: true, tickets_count: 0, selected_ticket_status_text: "stale" }), "conversation");
+  assert.equal(next({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "" }), undefined);
+  assert.equal(next({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "Backend status." }), "ticket_status");
+  for (const source of ["ticket_status", "ticket_status_error"]) {
+    const edge = DEFINITION.conversation_flow.edges.find(edge => edge.start_node_id === source)!;
+    assert.equal(edge.condition.type, "default"); assert.equal(edge.target.node_id, "goodbye");
+  }
 });
 
 // Account availability is a GET; failure never silently picks another model.
@@ -156,6 +189,25 @@ test("two deployments reuse one assistant and preserve previous ids and auto TeX
   assert.equal(store.state.kv_namespace_id, "kv-existing");
   assert.equal(store.state.mcp_server_id, "mcp-example");
   assert.equal(store.state.untouched, true);
+});
+
+// Shared response definitions remain read-only; one missing or unsafe updater
+// causes repair by update on the same assistant, never another creation.
+test("merged updater reads preserve ids and reject an expanded variable allowlist", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  const resource = api.items.get(first.resource.id)!;
+  const updater = (resource.tools as Record<string, unknown>[]).find(tool => tool.type === "update_dynamic_variables")!;
+  const fields = updater.update_dynamic_variables as { updatable_variables: { name: string; type: string }[] };
+  fields.updatable_variables.reverse(); (resource.tools as unknown[]).reverse();
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "reused");
+  fields.updatable_variables.push({ name: "technician_available", type: "string" });
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
+  const current = api.items.get(first.resource.id)!;
+  (current.tools as unknown[]).pop();
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
+  assert.equal(api.items.size, 1);
+  assert.equal(api.calls.filter(call => call.method === "POST" && call.path === "/ai/assistants").length, 1);
 });
 
 // A discovered id must also be hydrated, even when no id survived locally.
@@ -196,14 +248,24 @@ test("changed instructions update the same assistant with the complete desired g
 
 // Canvas reorder and read-only defaults do not trigger repeated writes, while
 // an extra graph step must be removed by a complete graph update.
-test("graph order is irrelevant but extra nodes are corrected by update", async () => {
+test("canvas order and grouping are irrelevant but extra nodes are corrected by update", async () => {
   const store = new Store(); const api = new Registry(store);
   const first = await upsertAssistant(api, store, DEFINITION);
   const flow = api.items.get(first.resource.id)!.conversation_flow as typeof DEFINITION.conversation_flow;
-  flow.nodes.reverse(); flow.edges.reverse();
+  flow.nodes.reverse(); flow.edges.sort((a, b) => a.start_node_id.localeCompare(b.start_node_id));
   assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "reused");
   flow.nodes.push({ ...flow.nodes[0], id: "extra" });
   assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
+});
+
+// Guard declaration order changes runtime behavior, unlike canvas node order.
+test("changed expression priority is repaired on the existing assistant", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  const flow = api.items.get(first.resource.id)!.conversation_flow as typeof DEFINITION.conversation_flow;
+  flow.edges.reverse();
+  const result = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(result.action, "updated"); assert.equal(result.resource.id, first.resource.id);
 });
 
 // Partial or lost POST outcomes reuse the same logical resource/checkpoint.

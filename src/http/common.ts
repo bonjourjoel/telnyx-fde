@@ -3,8 +3,9 @@
 
 import { DEFAULT_INIT_DYNAMIC_VARIABLES, isSupportChannel, type SupportIdentityRequest } from "../contracts";
 import { errorCode, logEvent, OUTCOME, type Stage, type Outcome } from "../logging";
-import { readRawBody, verifyTelnyxSignature } from "../security";
+import { readRawBody, verifyTelnyxSignature, verifyAdminSecret } from "../security";
 import { SupportConfigError } from "../kv-errors";
+import { resolveSupportActorKey } from "../identity";
 
 // Only the injected runtime secrets required by these HTTP handlers.
 export interface RuntimeSecrets {
@@ -64,6 +65,22 @@ export function parseObject(raw: Uint8Array): Record<string, unknown> {
     // No parser message is exposed: it may contain sensitive input excerpts.
   }
   throw new HttpError(400, "invalid_json_object");
+}
+
+// Shared administration boundary: authenticate before inspecting request data.
+export async function adminJson(req: Request, context: HttpContext): Promise<Record<string, unknown>> {
+  if (!context.secrets.admin_secret) throw new HttpError(503, "administration_unavailable");
+  if (!verifyAdminSecret(req, context.secrets.admin_secret)) throw new HttpError(401, "unauthorized");
+  return parseObject(await readRawBody(req));
+}
+
+// Administrative operations target one existing identity scheme, never all
+// callers. The same resolver also serves signed initialization and creation.
+export async function adminActorKey(body: Record<string, unknown>, context: HttpContext): Promise<string> {
+  if (!context.secrets.caller_hmac_key) throw new HttpError(503, "identity_unavailable");
+  const key = await resolveSupportActorKey(requestIdentity(body), context.env, context.secrets.caller_hmac_key);
+  if (!key) throw new HttpError(422, "caller_identity_unusable");
+  return key;
 }
 
 // Read original bytes once; verify timestamp and signature before parsing JSON.

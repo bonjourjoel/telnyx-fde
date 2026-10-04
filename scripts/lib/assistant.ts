@@ -8,6 +8,7 @@ import type { ConversationFlow } from "../../config/workflow";
 import type { DeploymentStateStore } from "./deployment-state";
 import { matchesDesired, upsertResource, type ResourceApi } from "./resource-upsert";
 import { TelnyxApiError } from "./telnyx-api";
+import { WRITABLE_DYNAMIC_VARIABLE_KEYS } from "../../src/contracts";
 
 // List/create/get share these identity fields; configuration is checked below.
 const AssistantSchema = z.object({ id: z.string().min(1), name: z.string().min(1) }).passthrough();
@@ -29,8 +30,8 @@ function assistantResource(value: unknown): AssistantResource {
   throw new TelnyxApiError("invalid_assistant_resource");
 }
 
-// Compare complete graph membership by stable ids, ignoring array order and
-// resolved GET-only tools. Extra nodes/edges or effective overrides still fail.
+// Compare complete graph membership by stable ids, ignoring canvas node order
+// and resolved GET-only tools. Expression order per source remains significant.
 function configuredFlow(value: unknown, desired: ConversationFlow): boolean {
   const flow = record(value);
   if (!flow || flow.start_node_id !== desired.start_node_id) return false;
@@ -51,19 +52,38 @@ function configuredFlow(value: unknown, desired: ConversationFlow): boolean {
       if (field === "nodes" && ["model", "external_llm", "llm_api_key_ref", "voice_settings", "transcription"]
         .some((key) => saved[key] != null)) return false;
     }
+    if (field === "edges") {
+      // Telnyx evaluates variable guards in declaration order. Reversing the
+      // guards could let stale status data bypass a failed initialization.
+      const sources = new Set(desired.edges.filter(edge => edge.condition.type === "expression").map(edge => edge.start_node_id));
+      for (const source of sources) {
+        const wantedIds = desired.edges.filter(edge => edge.start_node_id === source && edge.condition.type === "expression").map(edge => edge.id);
+        const actualIds = entries.map(record).filter(edge => edge?.start_node_id === source && record(edge.condition)?.type === "expression").map(edge => edge?.id);
+        if (!matchesDesired(actualIds, wantedIds)) return false;
+      }
+    }
   }
   return true;
 }
 
 // GET merges shared tools into tools instead of necessarily returning tool_ids.
-// Verify the sole shared hangup and its graph reference without resending it.
+// Verify the shared hangup/updater and its exact writable allowlist without
+// resending merged definitions. Node references are checked in configuredFlow.
 function configuredAssistant(resource: AssistantResource, desired: AssistantDefinition): boolean {
   const { tools: _inline, tool_ids, conversation_flow, ...fields } = desired;
   if (!matchesDesired(resource, fields) || !configuredFlow(resource.conversation_flow, conversation_flow)) return false;
-  if (resource.tool_ids !== undefined && !matchesDesired(resource.tool_ids, tool_ids)) return false;
-  if (!Array.isArray(resource.tools) || resource.tools.length !== 1) return false;
-  const hangup = record(resource.tools[0]);
-  return hangup?.shared === true && hangup.type === "hangup" && record(hangup.hangup) !== undefined;
+  const actualToolIds = resource.tool_ids;
+  if (actualToolIds !== undefined && (!Array.isArray(actualToolIds) || actualToolIds.length !== tool_ids.length ||
+    new Set(actualToolIds).size !== tool_ids.length || !tool_ids.every(id => actualToolIds.includes(id)))) return false;
+  if (!Array.isArray(resource.tools) || resource.tools.length !== tool_ids.length) return false;
+  const merged = resource.tools.map(record);
+  if (merged.some(tool => tool?.shared !== true)) return false;
+  const hangups = merged.filter(tool => tool?.type === "hangup");
+  const updaters = merged.filter(tool => tool?.type === "update_dynamic_variables");
+  if (hangups.length !== 1 || !record(hangups[0]?.hangup) || updaters.length !== 1) return false;
+  const updater = record(updaters[0]?.update_dynamic_variables);
+  if (updater?.name !== "SET_SUPPORT_VARIABLES" || !Array.isArray(updater.updatable_variables)) return false;
+  return matchesDesired(updater.updatable_variables, WRITABLE_DYNAMIC_VARIABLE_KEYS.map(name => ({ name, type: "string" })), false, "updatable_variables");
 }
 
 // Availability is checked before deployment writes. This read spends no model
