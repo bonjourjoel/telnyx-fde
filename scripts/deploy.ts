@@ -5,7 +5,7 @@
 // run repeatedly: it reuses identifiers stored in deployment-state.json and
 // never resets already-created state.
 //
-// Backend, MCP/shared tools, phone routing, ticket follow-up and FAQ through step 12:
+// Backend, MCP/shared tools, phone routing, FAQ and ticket creation through step 13:
 //   Preflight: typecheck, then the shared full local test suite, before .env.
 //   Runtime credential: validate the org SDK binding; renew only confirmed
 //   invalid/expired tokens on that same resource before storage/secrets/ship.
@@ -742,7 +742,7 @@ async function probeCheckConfig(funcUrl: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  console.log("=== telnyx-fde deploy (through step 12) ===");
+  console.log("=== telnyx-fde deploy (through step 13) ===");
 
   // Fail locally before loading credentials or provisioning any account resource.
   await checkTypeScript();
@@ -857,10 +857,13 @@ async function main(): Promise<void> {
   // 16. Ticket/FAQ workflow references existing tools; Portal identity is kept.
   const hangupId = sharedTools.find((tool) => tool.tool === "HANGUP")?.id;
   const updaterId = sharedTools.find((tool) => tool.tool === "SET_SUPPORT_VARIABLES")?.id;
+  const createTicketId = sharedTools.find((tool) => tool.tool === "CREATE_TICKET")?.id;
   if (!hangupId) throw new TelnyxApiError("missing_hangup_tool_id");
   if (!updaterId) throw new TelnyxApiError("missing_variable_updater_tool_id");
+  if (!createTicketId) throw new TelnyxApiError("missing_create_ticket_tool_id");
   const assistant = await upsertAssistant(getRestApi(), stateStore,
-    buildAssistant(funcUrl, state.func_name, mcp.server.id, { hangup: hangupId, set_support_variables: updaterId }));
+    buildAssistant(funcUrl, state.func_name, mcp.server.id,
+      { hangup: hangupId, set_support_variables: updaterId, create_ticket: createTicketId }));
   console.log(JSON.stringify({ operation: "assistant_upsert", action: assistant.action, id: assistant.resource.id }));
 
   // 17. Route the physical number with shared checkpoints and verification.
@@ -885,7 +888,7 @@ async function main(): Promise<void> {
   console.log(`MCP id       : ${state.mcp_server_id}.`);
   console.log(`Shared tools : ${sharedTools.length} verified (identifiers saved).`);
   console.log(`Assistant id : ${state.assistant_id}.`);
-  console.log("Workflow     : GREETING -> ORIENTATION -> TICKET_STATUS / FAQ_SHORT -> GOODBYE -> HANGUP.");
+  console.log("Workflow     : ticket follow-up / FAQ title / confirmed ticket creation -> short closing Speak -> HANGUP.");
   console.log(`Voice entry  : ${new URL("/voice-entry", funcUrl).href}`);
   console.log(`Phone id     : ${state.phone_number_id} (number in config/telephony.ts).`);
   console.log(`TeXML app id : ${state.texml_application_id}.`);

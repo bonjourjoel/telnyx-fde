@@ -14,7 +14,8 @@ Try "How do dynamic variables work?" or "How do Stateful Actors store data?"
 - Expect the documentation title, goodbye and automatic hangup.
 - There is no offer of a detailed explanation and no yes/no response to provide.
 - Try an unclear question: expect brief clarification only when needed.
-- Try an unrelated question: expect the not-covered message and hangup.
+- Try an unrelated question: expect the not-covered message, then a ticket offer.
+  Decline it to end the call, or follow [test-ticket-creation.md](test-ticket-creation.md).
 
 MCP/tool failure must produce the unavailable message, not a claim that no page
 covers the question. Native tool availability still needs the actual Portal test.

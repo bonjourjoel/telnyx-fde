@@ -1,4 +1,4 @@
-// Desired support assistant with ticket follow-up, MCP FAQ and safe defaults.
+// Desired assistant with ticket follow-up, MCP FAQ, confirmed creation and defaults.
 // Deployment injects existing resource ids; no credentials or phone values here.
 
 import { DEFAULT_INIT_DYNAMIC_VARIABLES, WRITABLE_DYNAMIC_VARIABLE_KEYS, CREATED_TICKET_VARIABLE_KEYS } from "../src/contracts";

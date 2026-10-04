@@ -1,5 +1,5 @@
 // Ticket follow-up and MCP FAQ workflow, with validated graph/tool references
-// and deterministic context guards. Intake and transfer remain later steps.
+// and confirmed ticket creation. Transfer remains a later step.
 
 import * as z from "zod/v4";
 import {
@@ -8,6 +8,10 @@ import {
   CREATED_TICKET_VARIABLE_KEYS,
 } from "../src/contracts";
 import { FAQ_SHORT_PROMPT, RESOLUTION_MESSAGE, FAQ_ERROR_MESSAGE } from "./faq-prompts";
+import {
+  TICKET_INTAKE_PROMPT, TICKET_CONFIRM_PROMPT, TICKET_CREATED_MESSAGE,
+  TICKET_ERROR_MESSAGE, TICKET_UNAVAILABLE_MESSAGE,
+} from "./ticket-prompts";
 
 // Support wording stays separate from graph construction for easy review.
 export const END_CONVERSATION_CONDITION =
@@ -65,6 +69,7 @@ function withGoodbye(message: string): string {
 export interface SupportWorkflowTools {
   hangup: string;
   set_support_variables: string;
+  create_ticket: string;
 }
 
 // Explicit request schemas exclude resolved tools and other response-only fields.
@@ -115,6 +120,14 @@ const ComparisonSchema = z.strictObject({
     z.strictObject({ type: z.literal("string_literal"), value: z.string() }),
   ]),
 });
+// Step 13 needs conjunctions of typed comparisons for readiness and results.
+// Support only the documented flat AND form used here, not arbitrary ASTs.
+const AndSchema = z.strictObject({
+  type: z.literal("bool_op"),
+  op: z.literal("and"),
+  operands: z.array(ComparisonSchema).min(2),
+});
+const ExpressionSchema = z.discriminatedUnion("type", [ComparisonSchema, AndSchema]);
 const EdgeSchema = z.strictObject({
   id: z.string().min(1),
   start_node_id: z.string().min(1),
@@ -127,7 +140,7 @@ const EdgeSchema = z.strictObject({
     z.strictObject({ type: z.literal("llm"), prompt: z.string().min(1) }),
     z.strictObject({
       type: z.literal("expression"),
-      expression: ComparisonSchema,
+      expression: ExpressionSchema,
     }),
   ]),
 });
@@ -143,6 +156,7 @@ const KNOWN_VARIABLES = new Set<string>([
   ...INIT_DYNAMIC_VARIABLE_KEYS,
   ...WRITABLE_DYNAMIC_VARIABLE_KEYS,
   ...CREATED_TICKET_VARIABLE_KEYS,
+  "telnyx_last_tool_status_code",
 ]);
 
 // Check the same graph invariants enforced by Telnyx before provisioning writes.
@@ -166,11 +180,12 @@ export function validateConversationFlow(
   for (const edge of flow.edges) {
     if (!nodes.has(edge.start_node_id) || !nodes.has(edge.target.node_id))
       throw new Error("invalid conversation flow edge reference");
-    if (
-      edge.condition.type === "expression" &&
-      !KNOWN_VARIABLES.has(edge.condition.expression.left.name)
-    ) {
-      throw new Error("unknown workflow dynamic variable");
+    if (edge.condition.type === "expression") {
+      const expression = edge.condition.expression;
+      const comparisons = expression.type === "comparison" ? [expression] : expression.operands;
+      if (comparisons.some(item => !KNOWN_VARIABLES.has(item.left.name))) {
+        throw new Error("unknown workflow dynamic variable");
+      }
     }
   }
   for (const node of flow.nodes) {
@@ -232,15 +247,20 @@ function comparison(
   };
 }
 
+// Combine the existing comparison builder while preserving every literal type.
+function allOf(...conditions: ReturnType<typeof comparison>[]) {
+  return { type: "expression" as const, expression: {
+    type: "bool_op" as const, op: "and" as const,
+    operands: conditions.map(condition => condition.expression),
+  } };
+}
+
 // Keep ticket identities and closing paths; replace the new-question placeholder
-// with FAQ title lookup, a closing Speak and safe fallbacks.
+// with FAQ title lookup, caller-confirmed creation and short closing messages.
 export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationFlow {
-  if (
-    !tools.hangup.trim() ||
-    !tools.set_support_variables.trim() ||
-    tools.hangup === tools.set_support_variables
-  ) {
-    throw new Error("invalid follow-up tool references");
+  const references = [tools.hangup, tools.set_support_variables, tools.create_ticket];
+  if (references.some(id => !id.trim()) || new Set(references).size !== references.length) {
+    throw new Error("invalid support tool references");
   }
   return validateConversationFlow(
     {
@@ -281,7 +301,33 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
           position: { x: 600, y: 180 },
         },
         {
-          type: "speak", id: "resolution", name: "RESOLUTION", message: withGoodbye(RESOLUTION_MESSAGE), position: { x: 900, y: 360 },
+          type: "speak", id: "resolution", name: "RESOLUTION", message: RESOLUTION_MESSAGE, position: { x: 900, y: 360 },
+        },
+        {
+          type: "prompt", id: "ticket_intake", name: "TICKET_INTAKE", instructions: TICKET_INTAKE_PROMPT,
+          instructions_mode: "append", shared_tool_ids: [tools.set_support_variables], tools_mode: "replace",
+          position: { x: 1200, y: 360 },
+        },
+        {
+          type: "prompt", id: "ticket_confirm", name: "TICKET_CONFIRM", instructions: TICKET_CONFIRM_PROMPT,
+          instructions_mode: "append", shared_tool_ids: [], tools_mode: "replace",
+          position: { x: 1500, y: 360 },
+        },
+        {
+          type: "tool", id: "create_ticket", name: "CREATE_TICKET", shared_tool_id: tools.create_ticket,
+          position: { x: 1800, y: 360 },
+        },
+        {
+          type: "speak", id: "ticket_created", name: "TICKET_CREATED", message: withGoodbye(TICKET_CREATED_MESSAGE),
+          position: { x: 2100, y: 360 },
+        },
+        {
+          type: "speak", id: "ticket_error", name: "TICKET_ERROR", message: withGoodbye(TICKET_ERROR_MESSAGE),
+          position: { x: 1800, y: 540 },
+        },
+        {
+          type: "speak", id: "ticket_unavailable", name: "TICKET_UNAVAILABLE", message: withGoodbye(TICKET_UNAVAILABLE_MESSAGE),
+          position: { x: 1500, y: 720 },
         },
         {
           type: "speak", id: "faq_error", name: "FAQ_ERROR", message: withGoodbye(FAQ_ERROR_MESSAGE), position: { x: 900, y: 540 },
@@ -398,7 +444,59 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
           id: "faq_short_failed", start_node_id: "faq_short", target: { type: "node", node_id: "faq_error" },
           condition: { type: "llm", prompt: "A required MCP tool failed or was unavailable, or returned an incomplete result, so the short documentation lookup could not be completed." },
         },
-        { id: "resolution_to_hangup", start_node_id: "resolution", target: { type: "node", node_id: "hangup" }, condition: { type: "default" } },
+        { id: "resolution_to_intake", start_node_id: "resolution", target: { type: "node", node_id: "ticket_intake" }, condition: { type: "default" } },
+        {
+          id: "ticket_intake_unavailable", start_node_id: "ticket_intake", target: { type: "node", node_id: "ticket_unavailable" },
+          condition: comparison("can_create_ticket", true, "!="),
+        },
+        {
+          id: "ticket_intake_to_confirm", start_node_id: "ticket_intake", target: { type: "node", node_id: "ticket_confirm" },
+          condition: { type: "llm", prompt: "The caller wants a support ticket, both subject and description are complete, and the latest SET_SUPPORT_VARIABLES call successfully stored both fields. Corrections must be stored before returning to confirmation." },
+        },
+        {
+          id: "ticket_intake_failed", start_node_id: "ticket_intake", target: { type: "node", node_id: "ticket_error" },
+          condition: { type: "llm", prompt: "The required SET_SUPPORT_VARIABLES update failed or was unavailable. Missing details alone require collection, not this error transition." },
+        },
+        {
+          id: "ticket_intake_cancel", start_node_id: "ticket_intake", target: { type: "node", node_id: "goodbye" },
+          condition: { type: "llm", prompt: "The caller declines the ticket offer, cancels, or asks to end the conversation." },
+        },
+        {
+          id: "ticket_confirm_unavailable", start_node_id: "ticket_confirm", target: { type: "node", node_id: "ticket_unavailable" },
+          condition: comparison("can_create_ticket", true, "!="),
+        },
+        {
+          id: "ticket_confirm_missing_subject", start_node_id: "ticket_confirm", target: { type: "node", node_id: "ticket_intake" },
+          condition: comparison("ticket_subject", ""),
+        },
+        {
+          id: "ticket_confirm_missing_description", start_node_id: "ticket_confirm", target: { type: "node", node_id: "ticket_intake" },
+          condition: comparison("ticket_description", ""),
+        },
+        {
+          id: "ticket_confirm_create", start_node_id: "ticket_confirm", target: { type: "node", node_id: "create_ticket" },
+          condition: { type: "llm", prompt: "The assistant restated this complete ticket request and asked 'Should I create this ticket?', and the caller has now explicitly agreed to that final confirmation question. Agreement to the earlier ticket offer, silence, ambiguity, or a correction is not final confirmation." },
+        },
+        {
+          id: "ticket_confirm_correct", start_node_id: "ticket_confirm", target: { type: "node", node_id: "ticket_intake" },
+          condition: { type: "llm", prompt: "The caller wants to correct the ticket subject or description before creation." },
+        },
+        {
+          id: "ticket_confirm_cancel", start_node_id: "ticket_confirm", target: { type: "node", node_id: "goodbye" },
+          condition: { type: "llm", prompt: "The caller refuses creation, cancels, or asks to end the conversation." },
+        },
+        {
+          id: "ticket_creation_succeeded", start_node_id: "create_ticket", target: { type: "node", node_id: "ticket_created" },
+          condition: allOf(comparison("telnyx_last_tool_status_code", "200"),
+            comparison("created_ticket_id", "", "!="), comparison("created_ticket_reference", "", "!=")),
+        },
+        {
+          id: "ticket_creation_failed", start_node_id: "create_ticket", target: { type: "node", node_id: "ticket_error" },
+          condition: { type: "default" },
+        },
+        { id: "ticket_created_to_hangup", start_node_id: "ticket_created", target: { type: "node", node_id: "hangup" }, condition: { type: "default" } },
+        { id: "ticket_error_to_hangup", start_node_id: "ticket_error", target: { type: "node", node_id: "hangup" }, condition: { type: "default" } },
+        { id: "ticket_unavailable_to_hangup", start_node_id: "ticket_unavailable", target: { type: "node", node_id: "hangup" }, condition: { type: "default" } },
         { id: "faq_error_to_hangup", start_node_id: "faq_error", target: { type: "node", node_id: "hangup" }, condition: { type: "default" } },
         {
           id: "goodbye_to_hangup",
@@ -408,6 +506,6 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
         },
       ],
     },
-    [tools.hangup, tools.set_support_variables],
+    references,
   );
 }

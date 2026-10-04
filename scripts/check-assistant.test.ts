@@ -5,8 +5,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildAssistant, ASSISTANT_MODEL, ASSISTANT_INSTRUCTIONS, INIT_WEBHOOK_TIMEOUT_MS } from "../config/assistant";
-import { buildSupportWorkflow, validateConversationFlow, ORIENTATION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION } from "../config/workflow";
+import { buildSupportWorkflow, validateConversationFlow, ORIENTATION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION, type ConversationFlow } from "../config/workflow";
 import { FAQ_SHORT_PROMPT } from "../config/faq-prompts";
+import { TICKET_INTAKE_PROMPT, TICKET_CONFIRM_PROMPT } from "../config/ticket-prompts";
+import { buildSharedTools } from "../config/tools";
 import { DEFAULT_INIT_DYNAMIC_VARIABLES, WRITABLE_DYNAMIC_VARIABLE_KEYS, CREATED_TICKET_VARIABLE_KEYS } from "../src/contracts";
 import { assertAssistantModelAvailable, upsertAssistant } from "./lib/assistant";
 import { TelnyxApiError, type ApiMethod } from "./lib/telnyx-api";
@@ -14,13 +16,29 @@ import type { DeploymentState, DeploymentStateStore } from "./lib/deployment-sta
 import type { ResourceApi } from "./lib/resource-upsert";
 
 // Fictional resource identities keep fixtures independent of the live account.
-const TOOL_IDS = { hangup: "tool-hangup", set_support_variables: "tool-updater" };
+const TOOL_IDS = { hangup: "tool-hangup", set_support_variables: "tool-updater", create_ticket: "tool-create-ticket" };
 const DEFINITION = buildAssistant("https://function.example.invalid", "telnyx-fde", "mcp-example", TOOL_IDS);
+
+// Interpret only deterministic guards from the actual JSON for negative cases.
+// This does not exercise the hosted model or Telnyx's runtime edge evaluator.
+type Expression = Extract<ConversationFlow["edges"][number]["condition"], { type: "expression" }>["expression"];
+function evaluate(expression: Expression, values: Record<string, unknown>): boolean {
+  if (expression.type === "bool_op") return expression.operands.every(item => evaluate(item, values));
+  const actual = values[expression.left.name];
+  return expression.op === "==" ? actual === expression.right.value : actual !== expression.right.value;
+}
+
+// Defaults are considered only after every deterministic guard has failed.
+function expressionTarget(source: string, values: Record<string, unknown>): string | undefined {
+  const edges = DEFINITION.conversation_flow.edges.filter(edge => edge.start_node_id === source);
+  return edges.find(edge => edge.condition.type === "expression" && evaluate(edge.condition.expression, values))?.target.node_id
+    ?? edges.find(edge => edge.condition.type === "default")?.target.node_id;
+}
 
 // Snapshotting store exposes checkpoint loss and preserves previous step ids.
 class Store implements DeploymentStateStore {
   state: DeploymentState = { kv_namespace_id: "kv-existing", mcp_server_id: "mcp-example",
-    shared_tool_ids: { HANGUP: "tool-hangup", SET_SUPPORT_VARIABLES: "tool-updater" }, untouched: true };
+    shared_tool_ids: { HANGUP: "tool-hangup", SET_SUPPORT_VARIABLES: "tool-updater", CREATE_TICKET: "tool-create-ticket" }, untouched: true };
   // Read detached state as the JSON repository does.
   async load(): Promise<DeploymentState> { return structuredClone(this.state); }
   // No file is written by this double.
@@ -104,7 +122,7 @@ test("support assistant keeps ticket context and scopes model tools for MCP FAQ"
   for (const key of [...WRITABLE_DYNAMIC_VARIABLE_KEYS, ...CREATED_TICKET_VARIABLE_KEYS]) assert.equal(DEFINITION.dynamic_variables[key], "");
   assert.deepEqual(DEFINITION.enabled_features, ["telephony"]);
   assert.deepEqual(DEFINITION.mcp_servers, [{ id: "mcp-example", allowed_tools: ["list_topics", "read_short_answer", "read_long_answer"] }]);
-  assert.equal(DEFINITION.conversation_flow.nodes.length, 10);
+  assert.equal(DEFINITION.conversation_flow.nodes.length, 16);
   const prompt = DEFINITION.conversation_flow.nodes.find((node) => node.type === "prompt" && node.id === "faq_short")!;
   assert.ok(prompt.type === "prompt");
   assert.equal(prompt.instructions, FAQ_SHORT_PROMPT);
@@ -143,24 +161,23 @@ test("graph validation rejects missing/duplicate ids, invalid routing and unknow
   mutate((flow) => { flow.edges.pop(); });
   mutate((flow) => { const node = flow.nodes.find(node => node.id === "hangup")!; if (node.type === "tool") node.shared_tool_id = "unknown"; });
   mutate((flow) => { const edge = flow.edges.find(edge => edge.condition.type === "expression")!;
-    if (edge.condition.type === "expression") edge.condition.expression.left.name = "unknown_variable"; });
+    if (edge.condition.type === "expression" && edge.condition.expression.type === "comparison") edge.condition.expression.left.name = "unknown_variable"; });
+  mutate((flow) => { const edge = flow.edges.find(edge => edge.id === "ticket_creation_succeeded")!;
+    if (edge.condition.type === "expression" && edge.condition.expression.type === "bool_op") edge.condition.expression.operands[1].left.name = "unknown_variable"; });
+  mutate((flow) => { const edge = flow.edges.find(edge => edge.id === "ticket_creation_succeeded")!;
+    if (edge.condition.type === "expression" && edge.condition.expression.type === "bool_op") edge.condition.expression.operands = []; });
 });
 
 // Assert routing precedence from the actual graph, not a mirrored builder. These
 // cases prove conditions, not the hosted model's choice or native tool execution.
 test("context and status guards prevent empty or failed-context status delivery", () => {
-  const outgoing = DEFINITION.conversation_flow.edges.filter(edge => edge.start_node_id === "orientation" && edge.condition.type === "expression");
-  const next = (values: Record<string, unknown>) => outgoing.find(edge => {
-    if (edge.condition.type !== "expression") return false;
-    const e = edge.condition.expression;
-    return e.op === "==" ? values[e.left.name] === e.right.value : values[e.left.name] !== e.right.value;
-  })?.target.node_id;
+  const next = (values: Record<string, unknown>) => expressionTarget("orientation", values);
   assert.equal(next({ init_ok: false, tickets_count: 0, selected_ticket_status_text: "" }), "context_unavailable");
   assert.equal(next({ init_ok: false, tickets_count: 2, selected_ticket_status_text: "stale" }), "context_unavailable");
   assert.equal(next({ init_ok: true, tickets_count: 0, selected_ticket_status_text: "stale" }), "faq_short");
   assert.equal(next({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "" }), undefined);
   assert.equal(next({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "Backend status." }), "ticket_status");
-  for (const source of ["ticket_status", "ticket_status_error", "resolution", "faq_error"]) {
+  for (const source of ["ticket_status", "ticket_status_error", "faq_error", "ticket_created", "ticket_error", "ticket_unavailable"]) {
     const edge = DEFINITION.conversation_flow.edges.find(edge => edge.start_node_id === source)!;
     assert.equal(edge.condition.type, "default"); assert.equal(edge.target.node_id, "hangup");
     const node = DEFINITION.conversation_flow.nodes.find(node => node.id === source)!;
@@ -168,6 +185,75 @@ test("context and status guards prevent empty or failed-context status delivery"
     assert.ok(node.message.endsWith(GOODBYE_MESSAGE));
     assert.equal(node.message.split(GOODBYE_MESSAGE).length, 2);
     if (source === "ticket_status") assert.equal(node.message, `{{selected_ticket_status_text}} ${GOODBYE_MESSAGE}`);
+  }
+});
+
+// The immutable capability is checked before both collection and final consent;
+// missing fields return to intake without automatically creating a ticket.
+test("ticket preparation guards fail closed and preserve correction/cancellation paths", () => {
+  for (const source of ["ticket_intake", "ticket_confirm"]) {
+    for (const capability of [false, undefined, null, "true", 1]) {
+      assert.equal(expressionTarget(source, { can_create_ticket: capability,
+        ticket_subject: "Subject", ticket_description: "Description" }), "ticket_unavailable");
+    }
+  }
+  assert.equal(expressionTarget("ticket_confirm", { can_create_ticket: true, ticket_subject: "", ticket_description: "Description" }), "ticket_intake");
+  assert.equal(expressionTarget("ticket_confirm", { can_create_ticket: true, ticket_subject: "Subject", ticket_description: "" }), "ticket_intake");
+  assert.equal(expressionTarget("ticket_confirm", { can_create_ticket: true, ticket_subject: "Subject", ticket_description: "Description" }), undefined);
+
+  const flow = DEFINITION.conversation_flow;
+  const entry = flow.edges.filter(edge => edge.target.node_id === "create_ticket");
+  assert.equal(entry.length, 1); assert.equal(entry[0].start_node_id, "ticket_confirm");
+  assert.ok(entry[0].condition.type === "llm"); assert.match(entry[0].condition.prompt, /explicitly agreed to that final confirmation/);
+  const paths = { ticket_intake_cancel: "goodbye", ticket_intake_failed: "ticket_error",
+    ticket_confirm_cancel: "goodbye", ticket_confirm_correct: "ticket_intake" };
+  for (const [id, target] of Object.entries(paths)) assert.equal(flow.edges.find(edge => edge.id === id)!.target.node_id, target);
+});
+
+// Status has the documented voice string type, and both mapped fields must be
+// present. A timeout or incomplete result is never a creation announcement.
+test("creation result needs HTTP string 200 plus id and reference without automatic retries", () => {
+  const results: [Record<string, unknown>, string][] = [
+    [{ telnyx_last_tool_status_code: "200", created_ticket_id: "ticket-id", created_ticket_reference: "T-0001" }, "ticket_created"],
+    [{ telnyx_last_tool_status_code: 200, created_ticket_id: "ticket-id", created_ticket_reference: "T-0001" }, "ticket_error"],
+    [{ telnyx_last_tool_status_code: "500", created_ticket_id: "ticket-id", created_ticket_reference: "T-0001" }, "ticket_error"],
+    [{ telnyx_last_tool_status_code: "200", created_ticket_id: "", created_ticket_reference: "T-0001" }, "ticket_error"],
+    [{ telnyx_last_tool_status_code: "200", created_ticket_id: "ticket-id", created_ticket_reference: "" }, "ticket_error"],
+    [{ telnyx_last_tool_status_code: "", created_ticket_id: "", created_ticket_reference: "" }, "ticket_error"],
+  ];
+  for (const [values, target] of results) assert.equal(expressionTarget("create_ticket", values), target);
+  const flow = DEFINITION.conversation_flow;
+  for (const source of ["ticket_created", "ticket_error", "ticket_unavailable"]) {
+    const edges = flow.edges.filter(edge => edge.start_node_id === source);
+    assert.equal(edges.length, 1); assert.equal(edges[0].target.node_id, "hangup");
+    assert.equal(edges[0].condition.type, "default");
+  }
+});
+
+// Prompt scopes exclude the business webhook and hangup. Tool-node arguments
+// match the shared webhook schema and the initialized writable variables.
+test("ticket tools remain scoped and bind exact business variables", () => {
+  const flow = DEFINITION.conversation_flow;
+  const intake = flow.nodes.find(node => node.id === "ticket_intake")!;
+  const confirm = flow.nodes.find(node => node.id === "ticket_confirm")!;
+  assert.ok(intake.type === "prompt" && confirm.type === "prompt");
+  assert.equal(intake.instructions, TICKET_INTAKE_PROMPT); assert.equal(confirm.instructions, TICKET_CONFIRM_PROMPT);
+  assert.equal(intake.tools_mode, "replace"); assert.deepEqual(intake.shared_tool_ids, [TOOL_IDS.set_support_variables]);
+  assert.equal(confirm.tools_mode, "replace"); assert.deepEqual(confirm.shared_tool_ids, []);
+  for (const node of flow.nodes) if (node.type === "prompt") {
+    assert.ok(!node.shared_tool_ids.includes(TOOL_IDS.create_ticket));
+    assert.ok(!node.shared_tool_ids.includes(TOOL_IDS.hangup));
+  }
+  const create = flow.nodes.find(node => node.id === "create_ticket")!;
+  assert.ok(create.type === "tool"); assert.equal(create.shared_tool_id, TOOL_IDS.create_ticket);
+  const webhook = buildSharedTools("https://function.example.invalid", "telnyx-fde").CREATE_TICKET.webhook!;
+  const parameters = webhook.body_parameters as { required: string[] };
+  assert.deepEqual(parameters.required, ["ticket_subject", "ticket_description"]);
+  for (const key of parameters.required) assert.equal(DEFINITION.dynamic_variables[key], "");
+  assert.equal(webhook.async, false);
+  for (const node of [intake, confirm]) {
+    const routes = [...node.instructions.matchAll(/transition__([a-z_]+)/g)].map(match => match[1]);
+    assert.deepEqual(routes.sort(), flow.edges.filter(edge => edge.start_node_id === node.id && edge.condition.type === "llm").map(edge => edge.id).sort());
   }
 });
 
@@ -196,7 +282,8 @@ test("title-only FAQ closes through goodbye without a long-answer branch", () =>
   const noMatch = flow.nodes.find(node => node.id === "resolution")!;
   const error = flow.nodes.find(node => node.id === "faq_error")!;
   assert.ok(noMatch.type === "speak" && error.type === "speak");
-  assert.match(noMatch.message, /does not cover/); assert.match(error.message, /couldn't retrieve/);
+  assert.equal(noMatch.message, "The FAQ doesn't cover this question."); assert.match(error.message, /couldn't retrieve/);
+  assert.equal(flow.edges.find(edge => edge.start_node_id === "resolution")!.target.node_id, "ticket_intake");
   assert.ok(!flow.nodes.some(node => node.id === "conversation"));
 });
 
@@ -266,6 +353,24 @@ test("FAQ tool inheritance and MCP allowlist drift update the same assistant", a
   (current.mcp_servers as { allowed_tools: string[] }[])[0].allowed_tools.push("unapproved-tool");
   assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
   assert.equal(api.items.size, 1);
+});
+
+// Creation references and typed result checks are owned configuration too.
+test("ticket creation readback drift is repaired on the same assistant", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  const flow = api.items.get(first.resource.id)!.conversation_flow as ConversationFlow;
+  const create = flow.nodes.find(node => node.id === "create_ticket")!;
+  assert.ok(create.type === "tool"); create.shared_tool_id = "tool-unexpected";
+  const result = flow.edges.find(edge => edge.id === "ticket_creation_succeeded")!;
+  assert.ok(result.condition.type === "expression" && result.condition.expression.type === "bool_op");
+  result.condition.expression.operands[0].right = { type: "number_literal", value: 200 };
+  const repaired = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(repaired.action, "updated"); assert.equal(repaired.resource.id, first.resource.id);
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "reused");
+  assert.equal(store.state.shared_tool_ids!.CREATE_TICKET, TOOL_IDS.create_ticket);
+  assert.equal(api.items.size, 1);
+  assert.equal(api.calls.filter(call => call.method === "POST" && call.path === "/ai/assistants").length, 1);
 });
 
 // A discovered id must also be hydrated, even when no id survived locally.

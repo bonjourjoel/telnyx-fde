@@ -2311,6 +2311,7 @@ Tasks:
 
 1. Add TICKET_INTAKE:
    - Check can_create_ticket.
+   - Offer a ticket unless the caller already requested one; wait for acceptance.
    - Collect the subject.
    - Collect a concise description.
    - Call SET_SUPPORT_VARIABLES.
@@ -2343,17 +2344,47 @@ Tasks:
    - Move to TICKET_CREATED.
 
 7. TICKET_CREATED:
-   - Speak the reference.
-   - GOODBYE.
-   - HANGUP.
+   - Speak the reference and goodbye together in one short message.
+   - Default edge to the HANGUP Tool node.
 
 8. Default exit from CREATE_TICKET:
    - TICKET_ERROR.
-   - Comprehensible failure message.
-   - GOODBYE.
-   - HANGUP.
+   - Say creation could not be confirmed, with goodbye in the same short Speak.
+   - Default edge to HANGUP. Never claim no ticket exists after a timeout.
 
 9. No automatic retry that could announce an uncertain result.
+
+Implementation for step 13:
+
+- config/ticket-prompts.ts holds Joel's approved structured intake/confirmation
+  wording and the short result prefixes. RESOLUTION now says only that the FAQ
+  does not cover the question and defaults to TICKET_INTAKE. MCP errors retain
+  their separate unavailable/closing branch. Transfer remains step 14.
+- Both intake and confirmation have a leading can_create_ticket != true guard
+  to TICKET_UNAVAILABLE. Confirmation checks missing subject/description before
+  any model turn. Intake uses only the shared updater; confirmation has no native
+  tools or MCP. Only a caller's explicit agreement to the final confirmation
+  question may route to CREATE_TICKET. Corrections return to intake and must be
+  stored again before a new confirmation; cancellation reaches goodbye/hangup.
+- CREATE_TICKET is a standalone Tool node using the existing shared id. Telnyx
+  resolves ticket_subject/ticket_description arguments from the same variable
+  names. Keep the signed synchronous backend, preset channel/caller/operation,
+  response mappings and Actor idempotence. No business backend rewrite is needed.
+- config/workflow.ts validates the documented bool_op AND of typed comparisons
+  and checks every operand's variable, including reserved read-only
+  telnyx_last_tool_status_code. Success requires its string "200" plus both
+  nonempty created result fields. Everything else defaults to TICKET_ERROR.
+- Success, error and unavailable messages each contain the shared goodbye and
+  default directly to HANGUP. No native hangup/creation is exposed to a Prompt,
+  no consecutive closing Speaks or automatic retries are added.
+- deploy.ts references CREATE_TICKET from the existing library upsert result and
+  sends the entire desired graph on the existing assistant. Resource ids, phone
+  routing, KV flag, HMAC, demo identity and Actor records are preserved.
+- Local tests cover capability and required-field guards, correction/cancellation
+  routes, typed success/fallback, tool scopes and stable-id readback repair. The
+  hosted model and actual voice callback are not simulated. Joel deploys and
+  follows docs/test-ticket-creation.md to verify the real Portal behavior, then
+  retrieves the ticket on a new call. Physical calls remain subject to D61.
 
 Validation:
 

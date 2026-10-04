@@ -31,6 +31,7 @@ A Telnyx Edge **StatefulActor** project, scaffolded with `telnyx-edge new-func -
 | `config/tools.ts` | Desired definitions of the four shared native tools. |
 | `config/assistant.ts` / `config/workflow.ts` | Assistant settings and ticket/FAQ workflow with context guards. |
 | `config/faq-prompts.ts` | Approved structured FAQ prompts and scripted fallback text. |
+| `config/ticket-prompts.ts` | Approved ticket collection/confirmation prompts and short result messages. |
 | `scripts/check-assistant.test.ts` | Offline graph, model preflight, and assistant create/update/reuse checks. |
 | `scripts/run-tests.ts` | Single full local test routine used by npm run test and deployment. |
 | `scripts/lib/` | Shared safe REST client, atomic state, and resource upsert adapters. |
@@ -655,10 +656,10 @@ Assistant `tool_ids` contains only the updater for ticket follow-up/intake.
 HANGUP is available only through the standalone Tool node, never as a native
 tool for any Prompt. Existing assistant, MCP, shared-tool and phone ids are reused.
 
-No catalogue match reaches the temporary `RESOLUTION` Speak. MCP failure reaches
-a distinct `FAQ_ERROR` Speak. Both include goodbye before hangup; unavailability
-is never declared as absent coverage. Ticket follow-up is preserved. Ticket
-creation and technician transfer remain steps 13/14.
+No catalogue match reaches the short `RESOLUTION` Speak, then ticket intake.
+MCP failure still reaches a distinct `FAQ_ERROR` Speak with goodbye before hangup;
+unavailability is never declared as absent coverage. Ticket follow-up is preserved.
+Technician transfer remains step 14.
 
 The local suite verifies ticket guard priority, title-only routing, closing
 Speak/default hangup paths, model tool scopes, allowlist repair and stable ids.
@@ -666,7 +667,41 @@ It also exercises the real SDK with native Telnyx conversation metadata in `_met
 outside strict business arguments. These checks do not run the hosted voice model.
 After deployment, follow [test-faq.md](docs/test-faq.md) for Portal validation of
 the two voice tool calls, spoken title, goodbye and hangup. Deployment and this live
-FAQ smoke test remain to be run by Joel. No fixtures or Actor records are changed.
+FAQ smoke test remain to be run by Joel. FAQ reads do not change Actor records.
+
+## Confirmed ticket creation (step 13)
+
+An uncovered question leads to the approved ticket offer and collection in
+`TICKET_INTAKE`. This Prompt exposes only SET_SUPPORT_VARIABLES, stores both
+`ticket_subject` and `ticket_description`, and waits for successful storage before
+`TICKET_CONFIRM`. The confirmation Prompt exposes no native tools or MCP. It
+briefly restates the request and asks "Should I create this ticket?". Only the
+caller agreeing to that final question can select the creation transition.
+Corrections return to intake; cancellations use the existing goodbye/hangup path.
+
+Both preparation nodes require `can_create_ticket` to be the boolean true. Missing
+confirmation fields return to intake. CREATE_TICKET is a standalone Tool node
+using the existing library id, never a model-visible native tool. Telnyx fills its
+two business arguments from identically named variables. The existing synchronous
+webhook preserves its channel/caller/operation presets and response mappings.
+Signatures, phone/Portal identity resolution and Actor idempotence are unchanged.
+
+The success edge uses the documented `bool_op` AND form: voice HTTP status string
+`"200"`, nonempty `created_ticket_id`, and nonempty `created_ticket_reference`.
+All other outcomes take the default error edge. A timeout may follow a committed
+write, so the error message says creation could not be confirmed rather than
+claiming no ticket exists. There is no automatic retry. Success, error and
+unavailability each use one short Speak containing goodbye, then default HANGUP.
+
+Deployment reuses the existing shared tool and assistant, replacing the complete
+graph. It never creates tickets, loads fixtures, resets Actors, changes caller
+HMAC/demo identity or toggles the technician flag. No transfer is offered yet.
+Local tests check the typed guards, correction/cancellation routes, scoped tools,
+business argument names, result fallback and readback drift. They do not run the
+hosted model or prove voice timing/callback behavior. Follow
+[test-ticket-creation.md](docs/test-ticket-creation.md) after deployment to verify
+real confirmation, cancellation, correction, callback mappings and next-call
+retrieval on the stable Portal demo Actor.
 
 ## KV failure diagnosis
 
