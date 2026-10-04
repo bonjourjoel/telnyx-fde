@@ -27,6 +27,9 @@ A Telnyx Edge **StatefulActor** project, scaffolded with `telnyx-edge new-func -
 | `scripts/check-mcp.ts` / `scripts/check-mcp.test.ts` | Official client verification and sequential offline protocol checks. |
 | `config/telephony.ts` | Explicitly authorized phone constants for the assistant and technician. |
 | `config/tools.ts` | Desired definitions of the four shared native tools. |
+| `config/assistant.ts` / `config/workflow.ts` | Minimal assistant settings, approved text, and the validated four-node workflow. |
+| `scripts/check-assistant.test.ts` | Offline graph, model preflight, and assistant create/update/reuse checks. |
+| `scripts/run-tests.ts` | Single full local test routine used by npm run test and deployment. |
 | `scripts/lib/` | Shared safe REST client, atomic state, and resource upsert adapters. |
 | `package.json` / `tsconfig.json` | TypeScript project configuration. |
 
@@ -402,7 +405,7 @@ and [client testing guide](https://github.com/modelcontextprotocol/typescript-sd
 `npm.cmd run deploy` now ships/checks the backend, upserts the HTTP MCP connection,
 then synchronizes `SET_SUPPORT_VARIABLES`, `CREATE_TICKET`, `TRANSFER`, and
 `HANGUP` through the account API. It retains the already-registered MCP id.
-Assistant/workflow creation remains a later step.
+Minimal assistant/workflow creation is added by step 9 below.
 
 Definitions come from `config/tools.ts`. The variable updater exposes only the
 five keys in `WRITABLE_DYNAMIC_VARIABLE_KEYS`. The synchronous creation webhook
@@ -412,6 +415,8 @@ has one destination and a fixed caller ID. Joel explicitly requested both phone
 values as constants in `config/telephony.ts`; neither is read from `.env`.
 
 The shared algorithm first reads a saved id and fully lists matching resources.
+List entries establish identity and uniqueness only; configuration comparisons
+use the full GET by id, including when an id is recovered from the list.
 It stops on failed reads, conflicting ownership, duplicates, or malformed local
 state. A missing resource is created with an idempotency key saved before POST.
 Returned ids are checkpointed immediately, then verified by GET and a uniqueness
@@ -430,16 +435,69 @@ Local verification (no `.env`, API account, deployment, or phone call):
 
 ```powershell
 npm.cmd run typecheck
-node --import tsx --test --test-concurrency=1 scripts/check-caller-tickets.ts scripts/check-http.ts scripts/check-mcp.test.ts scripts/check-mcp-registration.test.ts scripts/check-resource-upsert.test.ts
+npm.cmd run test
 ```
 
 The resource tests simulate two sequential synchronizations, definition changes,
 lost responses, partial creation, denied reads, duplicate names, malformed id
 maps, and redaction. They do not prove native tools were accepted by the live API.
-The new step 8 deployment has not been executed as part of this local coding step.
-Its two real deployment runs and read-back checks remain separate verification.
+Two real step 8 deployments succeeded on 2026-10-04. The second reused the same
+KV namespace, MCP and all four tool ids; configuration and the HMAC were preserved.
 
 Native request contracts follow the official
 [Tools Library](https://developers.telnyx.com/docs/inference/ai-assistants/tools-library),
 [Preset Webhook Parameters](https://developers.telnyx.com/docs/inference/ai-assistants/preset-webhook-parameters),
 and [Telnyx OpenAPI](https://github.com/team-telnyx/openapi/blob/master/openapi/spec3.json).
+
+## Minimal assistant deployment (step 9)
+
+`npm.cmd run deploy` now also upserts the project assistant and its complete graph:
+
+```text
+GREETING (Speak) -> CONVERSATION (Prompt) -> GOODBYE (Speak) -> HANGUP (Tool)
+```
+
+Configuration lives in `config/assistant.ts` and `config/workflow.ts`. The approved
+Speak messages are `{{greeting_text}}` and "Thank you for calling Telnyx developer
+support. Goodbye." The prompt uses append mode and a conditional exit when the
+user wants to end the conversation. It exposes no business tools; FAQ, ticket and
+transfer branches are later steps. The existing ticket greeting is preserved.
+
+The assistant uses voice-verified `moonshotai/Kimi-K2.6`, `Telnyx.KokoroTTS.af_heart`,
+and English `deepgram/flux` transcription. Deployment checks model availability
+through GET before provisioning writes. `/init` has an 8000 ms timeout and the
+same fallback variables as the backend. The standard greeting is empty to avoid
+a second greeting. The registered MCP and shared HANGUP are referenced by id.
+
+The assistant adapter reuses the saved id or a unique project name, checkpoints
+creation, sends desired configuration on update, and verifies the complete graph.
+Assistant list entries were observed with empty MCP/tools and a null flow even
+when GET by id returned the correct configuration. The list therefore never
+drives the update decision. GET-only resolved shared tools are never copied
+back into request bodies. The
+platform's automatically created default TeXML application id is saved, but phone
+number assignment and routing remain step 10. No tickets or fixtures are changed.
+
+Local verification:
+
+```powershell
+npm.cmd run typecheck
+npm.cmd run test
+```
+
+`npm.cmd run test` and deployment both call `runLocalTests` from
+`scripts/run-tests.ts`, which holds the complete local suite in one place.
+Deployment runs typecheck first, then all tests sequentially, before loading
+`.env` or accessing Telnyx. Either failure stops deployment with a failure result.
+
+These checks use synthetic API responses and state. Joel's two step 9 deployments
+confirmed API acceptance and the same assistant id. The corrected comparison was
+also run twice against the real assistant using GET only: both returned reused,
+with no API or local state writes. Use the Portal voice test to check one greeting,
+conversation, goodbye and hangup; this voice smoke test remains pending.
+
+Contracts follow the official [workflow guide](https://developers.telnyx.com/docs/inference/ai-assistants/workflows),
+[Create Assistant](https://developers.telnyx.com/api-reference/assistants/create-an-assistant),
+[Update Assistant](https://developers.telnyx.com/api-reference/assistants/update-an-assistant),
+[List Assistants](https://developers.telnyx.com/api-reference/assistants/list-assistants),
+and [voice model documentation](https://developers.telnyx.com/docs/voice/conversational-ai/quickstart).

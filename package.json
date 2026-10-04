@@ -6,6 +6,7 @@
   "private": true,
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "tsx scripts/run-tests.ts",
     "deploy": "tsx scripts/deploy.ts"
   },
   "dependencies": {

@@ -5,7 +5,8 @@
 // run repeatedly: it reuses identifiers stored in deployment-state.json and
 // never resets already-created state.
 //
-// Backend provisioning from step 4, plus MCP/shared-tool upserts from step 8:
+// Backend provisioning, MCP/shared tools, and the minimal assistant from step 9:
+//   Preflight: typecheck, then the shared full local test suite, before .env.
 //   1. Load .env (Node 24 process.loadEnvFile), confirm TELNYX_API_KEY.
 //   2. Load deployment-state.json (or {}).
 //   3. Resolve the KV namespace by id, then by name, then by creation. Never
@@ -36,7 +37,8 @@
 //      every dependency check passes (KV read + three secrets present).
 //  15. Upsert the existing HTTP MCP connection and four shared tools, checkpoint
 //      every id immediately, and verify their definitions and uniqueness.
-//  16. Save final deployment metadata and print ids/URLs only.
+//  16. Upsert the assistant and complete minimal workflow using existing ids.
+//  17. Save final deployment metadata and print ids/URLs only.
 //
 // All errors are surfaced explicitly. A 401/403/5xx during namespace lookup
 // is treated as an error, never as "resource absent", to avoid accidentally
@@ -62,6 +64,9 @@ import { createTelnyxApi, readApiJson, sanitizeDiagnostic, TelnyxApiError, type 
 import { createDeploymentStateStore, type DeploymentState } from "./lib/deployment-state";
 import { ensureMcpRegistration } from "./lib/mcp-registration";
 import { syncSharedTools } from "./lib/shared-tools";
+import { buildAssistant, ASSISTANT_MODEL, FAQ_TOOL_NAMES } from "../config/assistant";
+import { assertAssistantModelAvailable, upsertAssistant } from "./lib/assistant";
+import { runLocalTests } from "./run-tests";
 
 const execFileAsync = promisify(execFile);
 
@@ -731,7 +736,14 @@ async function probeCheckConfig(funcUrl: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  console.log("=== telnyx-fde deploy (through step 8) ===");
+  console.log("=== telnyx-fde deploy (through step 9) ===");
+
+  // Fail locally before loading credentials or provisioning any account resource.
+  await checkTypeScript();
+  console.log("TypeScript verification passed.");
+  console.log("Running all local tests...");
+  await runLocalTests();
+  console.log("All local tests passed.");
 
   // 1. Load .env. process.loadEnvFile is available on Node 24.
   try {
@@ -755,8 +767,8 @@ async function main(): Promise<void> {
   }
   const regenRequested = process.argv.includes("--regen-admin-secret");
   validateTelephony();
-  await checkTypeScript();
-  console.log("TypeScript verification passed.");
+  await assertAssistantModelAvailable(getRestApi(), ASSISTANT_MODEL);
+  console.log(`Assistant model available: ${ASSISTANT_MODEL}.`);
 
   // 2. State.
   let state = await stateStore.load();
@@ -824,11 +836,18 @@ async function main(): Promise<void> {
   const tools = buildSharedTools(funcUrl, state.func_name);
   const mcp = await ensureMcpRegistration(getRestApi(), stateStore, {
     name: state.func_name + "-faq", candidate_type: "http", url: new URL("/mcp", funcUrl).href,
-    allowed_tools: ["list_topics", "read_short_answer", "read_long_answer"],
+    allowed_tools: [...FAQ_TOOL_NAMES],
   }, true);
   console.log(JSON.stringify({ operation: "mcp_upsert", action: mcp.action, id: mcp.server.id }));
   const sharedTools = await syncSharedTools(getRestApi(), stateStore, tools);
   for (const tool of sharedTools) console.log(JSON.stringify({ operation: "shared_tool_upsert", ...tool }));
+
+  // 16. Minimal assistant only. Number assignment and TeXML routing are step 10.
+  const hangupId = sharedTools.find((tool) => tool.tool === "HANGUP")?.id;
+  if (!hangupId) throw new TelnyxApiError("missing_hangup_tool_id");
+  const assistant = await upsertAssistant(getRestApi(), stateStore,
+    buildAssistant(funcUrl, state.func_name, mcp.server.id, hangupId));
+  console.log(JSON.stringify({ operation: "assistant_upsert", action: assistant.action, id: assistant.resource.id }));
 
   // Reload the helpers' durable state before adding final deployment metadata.
   state = await stateStore.load();
@@ -837,7 +856,7 @@ async function main(): Promise<void> {
   await stateStore.save(state);
   console.log(`Saved ${STATE_FILE}.`);
 
-  // 16. Summary.
+  // 17. Summary.
   console.log("");
   console.log("=== Deployment summary ===");
   console.log(`Function URL : ${funcUrl}`);
@@ -845,6 +864,8 @@ async function main(): Promise<void> {
   console.log(`KV config key: ${SUPPORT_CONFIG_KEY}`);
   console.log(`MCP id       : ${state.mcp_server_id}.`);
   console.log(`Shared tools : ${sharedTools.length} verified (identifiers saved).`);
+  console.log(`Assistant id : ${state.assistant_id}.`);
+  console.log("Workflow     : GREETING -> CONVERSATION -> GOODBYE -> HANGUP.");
   console.log(
     `Secrets      : ${state.secrets_configured.join(", ")} (values never displayed).`,
   );

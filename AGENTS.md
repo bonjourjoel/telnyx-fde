@@ -1882,6 +1882,39 @@ Tasks:
     - Otherwise update the existing assistant.
     - Keep its id.
 
+Implementation for step 9:
+
+- config/assistant.ts and config/workflow.ts contain the texts approved by Joel.
+- The workflow is GREETING -> CONVERSATION -> GOODBYE -> HANGUP. The greeting
+  uses the existing greeting_text; both Speak exits are default edges, and the
+  conversation exits through an LLM condition. HANGUP is a terminal tool node.
+- Use moonshotai/Kimi-K2.6, documented as voice-verified by Telnyx. Before writes,
+  verify that exact id using GET /v2/ai/openai/models; never silently substitute.
+- Voice: Telnyx.KokoroTTS.af_heart. Transcription: deepgram/flux, language en.
+- Set greeting to an empty string, webhook timeout to 8000 ms, and initialize
+  all backend, writable, and creation-result variables from shared contracts.
+- Attach the registered MCP with its three-tool allowlist and the shared HANGUP.
+  The minimal Prompt uses shared_tool_ids=[] and tools_mode=replace. Business
+  tools are deliberately unavailable; do not forbid the workflow transition tool.
+  The later FAQ step must explicitly restore the tools it requires.
+- scripts/lib/assistant.ts handles POST creation/update, the documented complete
+  data list without pagination, flat/data-wrapped resources, and GET responses
+  with shared tools merged into tools. Never resend resolved GET definitions.
+- Save assistant_id and creation checkpoints through the common state helper.
+  Keep returned version/default TeXML application ids as non-secret metadata.
+  Telnyx automatically creates the default TeXML application with the assistant;
+  number assignment and routing remain step 10 work.
+- Verify the full graph by stable ids and reject extra nodes/edges or conflicting
+  providers. Repeated deployment keeps the assistant id and reuses matching config.
+- Assistant list entries were observed with empty MCP/tools and conversation_flow
+  null; GET by id returns the configured values. Use the list for identity and
+  uniqueness only. The common upsert compares the full GET before any update,
+  even when adopting an existing id that is not saved locally.
+- Joel's two real step 9 deployments confirmed creation/read-back and stable ids.
+  After the comparison fix, two GET-only checks against the real assistant both
+  returned reused with the same id. No API or local state writes were performed.
+  The Portal voice smoke test remains to be verified by Joel.
+
 Validation:
 
 - The assistant accepts the JSON.
@@ -1901,6 +1934,14 @@ Purpose: updating the existing assistant.
 Title: Conversation Workflows
 URL: https://developers.telnyx.com/docs/inference/ai-assistants/workflows
 Purpose: graph JSON, node types, and transitions.
+
+Title: Voice AI models
+URL: https://developers.telnyx.com/docs/voice/conversational-ai/quickstart
+Purpose: distinguish models available for inference from voice-verified models.
+
+Title: Get available models
+URL: https://developers.telnyx.com/api-reference/openai-chat/get-available-models-openai-compatible
+Purpose: verify the chosen model's account availability at deployment.
 
 ## STEP 10. CONNECT THE NUMBER AND MAKE THE FIRST CALL
 
@@ -2222,13 +2263,19 @@ Tasks:
 
 Assemble deploy.ts in this order:
 
+First run the TypeScript check, then the entire local suite, before loading .env.
+Both npm run test and deploy.ts must call runLocalTests from scripts/run-tests.ts.
+Maintain the test list and launch logic only there; do not duplicate it in deploy.
+Either failed check stops deployment before any account access or resource write.
+Then perform the following deployment operations:
+
 1. Check configuration and authentication.
 2. Locate or create the KV namespace.
 3. Wait for provisioning.
 4. Initialize only missing keys.
 5. Check stable secrets.
 6. Update the manifest.
-7. Run TypeScript checks.
+7. Reuse the completed local preflight checks; do not run them again here.
 8. Run telnyx-edge ship.
 9. Wait for /health to become available.
 10. Update the existing MCP registration.

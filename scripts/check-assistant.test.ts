@@ -1,0 +1,254 @@
+// Offline step 9 checks: valid workflow, native request shape, model preflight,
+// flat/merged assistant responses, resumable creation and idempotent updates.
+// No environment file, account, real deployment state or phone call is used.
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { buildAssistant, ASSISTANT_MODEL, ASSISTANT_INSTRUCTIONS, INIT_WEBHOOK_TIMEOUT_MS } from "../config/assistant";
+import { buildMinimalWorkflow, validateConversationFlow, CONVERSATION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION } from "../config/workflow";
+import { DEFAULT_INIT_DYNAMIC_VARIABLES, WRITABLE_DYNAMIC_VARIABLE_KEYS, CREATED_TICKET_VARIABLE_KEYS } from "../src/contracts";
+import { assertAssistantModelAvailable, upsertAssistant } from "./lib/assistant";
+import { TelnyxApiError, type ApiMethod } from "./lib/telnyx-api";
+import type { DeploymentState, DeploymentStateStore } from "./lib/deployment-state";
+import type { ResourceApi } from "./lib/resource-upsert";
+
+// Fictional resource identities keep fixtures independent of the live account.
+const DEFINITION = buildAssistant("https://function.example.invalid", "telnyx-fde", "mcp-example", "tool-hangup");
+
+// Snapshotting store exposes checkpoint loss and preserves previous step ids.
+class Store implements DeploymentStateStore {
+  state: DeploymentState = { kv_namespace_id: "kv-existing", mcp_server_id: "mcp-example",
+    shared_tool_ids: { HANGUP: "tool-hangup" }, untouched: true };
+  // Read detached state as the JSON repository does.
+  async load(): Promise<DeploymentState> { return structuredClone(this.state); }
+  // No file is written by this double.
+  async save(state: DeploymentState): Promise<void> { this.state = structuredClone(state); }
+}
+
+// Match observed API shapes: the list omits MCP/tools/flow configuration, while
+// GET by id returns the complete assistant, including resolved shared tools.
+class Registry implements ResourceApi {
+  items = new Map<string, Record<string, unknown>>();
+  calls: { method: ApiMethod; path: string; body?: unknown; key?: string }[] = [];
+  loseCreation = false;
+  failCreation = false;
+  denyRead = false;
+  badReadback = false;
+  wrappedResource = false;
+  constructor(private readonly store: Store) {}
+
+  // GET representation differs from request fields: tool_ids is not required
+  // in reads, and the merged shared tool must never be resent as inline input.
+  private resource(value: unknown, id: string): Record<string, unknown> {
+    const body = structuredClone(value) as Record<string, unknown>;
+    delete body.tool_ids;
+    return { ...body, id, version_id: "version-example", created_at: "2026-10-04T00:00:00Z",
+      tools: [{ type: "hangup", hangup: { description: "End the support conversation after the final message." }, shared: true }],
+      external_llm: null, llm_api_key_ref: null,
+      telephony_settings: { default_texml_app_id: "texml-auto-example" },
+      conversation_flow: { ...DEFINITION.conversation_flow,
+        ...(body.conversation_flow as object),
+        nodes: (body.conversation_flow as typeof DEFINITION.conversation_flow).nodes.map((node) =>
+          node.type === "prompt" ? { ...node, tools: [], model: null, external_llm: null } : node) },
+    };
+  }
+
+  // Only assistant CRUD is supported; creating other resources fails the check.
+  async request(method: ApiMethod, path: string, body?: unknown, key?: string): Promise<unknown> {
+    this.calls.push({ method, path, body: structuredClone(body), key });
+    assert.ok(path.startsWith("/ai/assistants"));
+    if (method === "GET") {
+      if (this.denyRead) throw new TelnyxApiError("api_request_rejected", method, path, 403);
+      if (path === "/ai/assistants") return { data: [...this.items.values()].map((item) => ({
+        ...structuredClone(item), mcp_servers: [], tools: [], conversation_flow: null,
+      })) };
+      const id = decodeURIComponent(path.slice("/ai/assistants/".length));
+      const item = structuredClone(this.items.get(id));
+      if (!item) throw new TelnyxApiError("api_request_rejected", method, path, 404);
+      if (this.badReadback) item.greeting = "Unexpected second greeting.";
+      return this.wrappedResource ? { data: item } : item;
+    }
+    assert.equal(method, "POST");
+    const input = body as typeof DEFINITION;
+    assert.ok(!("id" in input) && !("version_id" in input) && !("created_at" in input));
+    assert.deepEqual(input.tools, []);
+    assert.deepEqual(input.tool_ids, ["tool-hangup"]);
+    assert.ok(input.conversation_flow.nodes.every((node) => !("tools" in node) && !("model" in node)));
+    if (path === "/ai/assistants") {
+      assert.equal(key, this.store.state.assistant_creation_pending?.idempotency_key);
+      if (this.failCreation) { this.failCreation = false; throw new TelnyxApiError("network_result_unknown", method, path); }
+      const item = this.resource(body, "assistant-created");
+      this.items.set(String(item.id), item);
+      if (this.loseCreation) { this.loseCreation = false; throw new TelnyxApiError("network_result_unknown", method, path); }
+      return item;
+    }
+    const id = decodeURIComponent(path.slice("/ai/assistants/".length));
+    assert.ok(this.items.has(id));
+    const item = this.resource(body, id);
+    this.items.set(id, item);
+    return item;
+  }
+}
+
+// Approved wording, safe defaults and graph references are checked together.
+test("minimal assistant keeps approved text, webhook defaults and scoped tools", () => {
+  assert.equal(DEFINITION.instructions, ASSISTANT_INSTRUCTIONS);
+  assert.equal(DEFINITION.greeting, "");
+  assert.equal(DEFINITION.dynamic_variables_webhook_url, "https://function.example.invalid/init");
+  assert.equal(DEFINITION.dynamic_variables_webhook_timeout_ms, INIT_WEBHOOK_TIMEOUT_MS);
+  assert.equal(INIT_WEBHOOK_TIMEOUT_MS, 8000);
+  for (const [key, value] of Object.entries(DEFAULT_INIT_DYNAMIC_VARIABLES)) assert.equal(DEFINITION.dynamic_variables[key], value);
+  for (const key of [...WRITABLE_DYNAMIC_VARIABLE_KEYS, ...CREATED_TICKET_VARIABLE_KEYS]) assert.equal(DEFINITION.dynamic_variables[key], "");
+  assert.deepEqual(DEFINITION.enabled_features, ["telephony"]);
+  assert.deepEqual(DEFINITION.mcp_servers, [{ id: "mcp-example", allowed_tools: ["list_topics", "read_short_answer", "read_long_answer"] }]);
+  assert.equal(DEFINITION.conversation_flow.nodes.length, 4);
+  const prompt = DEFINITION.conversation_flow.nodes.find((node) => node.type === "prompt")!;
+  assert.equal(prompt.instructions, CONVERSATION_PROMPT);
+  assert.equal(prompt.instructions_mode, "append");
+  assert.deepEqual(prompt.shared_tool_ids, []);
+  assert.equal(prompt.tools_mode, "replace");
+  assert.equal(DEFINITION.conversation_flow.nodes[0].type === "speak" && DEFINITION.conversation_flow.nodes[0].message, "{{greeting_text}}");
+  assert.equal(DEFINITION.conversation_flow.nodes[2].type === "speak" && DEFINITION.conversation_flow.nodes[2].message, GOODBYE_MESSAGE);
+  assert.equal(DEFINITION.conversation_flow.edges[1].condition.type === "llm" && DEFINITION.conversation_flow.edges[1].condition.prompt, END_CONVERSATION_CONDITION);
+  assert.throws(() => buildAssistant("http://unsafe.invalid", "telnyx-fde", "mcp", "hangup"));
+  assert.throws(() => buildAssistant("https://safe.invalid", "telnyx-fde", "", "hangup"));
+});
+
+// Invalid graphs fail locally, before an API request or any provisioning write.
+test("graph validation rejects missing/duplicate ids, invalid routing and unknown tools", () => {
+  const mutate = (change: (flow: ReturnType<typeof buildMinimalWorkflow>) => void) => {
+    const flow = buildMinimalWorkflow("tool-hangup"); change(flow);
+    assert.throws(() => validateConversationFlow(flow, ["tool-hangup"]));
+  };
+  mutate((flow) => { flow.start_node_id = "missing"; });
+  mutate((flow) => { flow.nodes[1].id = flow.nodes[0].id; });
+  mutate((flow) => { flow.edges[1].id = flow.edges[0].id; });
+  mutate((flow) => { flow.edges[0].target.node_id = "missing"; });
+  mutate((flow) => { flow.edges[1].condition = { type: "default" }; });
+  mutate((flow) => { flow.edges.shift(); });
+  mutate((flow) => { flow.edges.pop(); });
+  mutate((flow) => { const node = flow.nodes[3]; if (node.type === "tool") node.shared_tool_id = "unknown"; });
+});
+
+// Account availability is a GET; failure never silently picks another model.
+test("model preflight accepts the chosen id and rejects missing/malformed catalogues", async () => {
+  const api: ResourceApi = { async request(method, path) {
+    assert.equal(method, "GET"); assert.equal(path, "/ai/openai/models");
+    return { data: [{ id: ASSISTANT_MODEL }] };
+  } };
+  await assertAssistantModelAvailable(api, ASSISTANT_MODEL);
+  await assert.rejects(assertAssistantModelAvailable({ async request() { return { data: [] }; } }, ASSISTANT_MODEL), { code: "assistant_model_unavailable" });
+  await assert.rejects(assertAssistantModelAvailable({ async request() { return {}; } }, ASSISTANT_MODEL), { code: "invalid_model_catalogue" });
+});
+
+// Match documented flat and data-wrapped resources without a second creation.
+test("two deployments reuse one assistant and preserve previous ids and auto TeXML metadata", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  api.wrappedResource = true;
+  const second = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(first.action, "created"); assert.equal(second.action, "reused");
+  assert.equal(first.resource.id, second.resource.id);
+  assert.equal(api.calls.filter((call) => call.method !== "GET").length, 1);
+  assert.equal(store.state.assistant_id, first.resource.id);
+  assert.equal(store.state.assistant_creation_pending, undefined);
+  assert.equal(store.state.assistant_default_texml_app_id, "texml-auto-example");
+  assert.equal(store.state.kv_namespace_id, "kv-existing");
+  assert.equal(store.state.mcp_server_id, "mcp-example");
+  assert.equal(store.state.untouched, true);
+});
+
+// A discovered id must also be hydrated, even when no id survived locally.
+// Partial list values cannot trigger writes or conceal a failed detail read.
+test("incomplete assistant lists use full GET before deciding reuse or update", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  delete store.state.assistant_id;
+  delete store.state.assistant_default_texml_app_id;
+  const writes = api.calls.filter((call) => call.method !== "GET").length;
+  const second = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(second.action, "reused");
+  assert.equal(second.resource.id, first.resource.id);
+  assert.equal(store.state.assistant_default_texml_app_id, "texml-auto-example");
+  assert.equal(api.calls.filter((call) => call.method !== "GET").length, writes);
+
+  // A successful list is insufficient if its matching resource cannot be read.
+  delete store.state.assistant_id;
+  const denied: ResourceApi = { async request(method, path, body, key) {
+    if (method === "GET" && path !== "/ai/assistants") throw new TelnyxApiError("api_request_rejected", method, path, 403);
+    return api.request(method, path, body, key);
+  } };
+  await assert.rejects(upsertAssistant(denied, store, DEFINITION), { http_status: 403 });
+  assert.equal(api.calls.filter((call) => call.method !== "GET").length, writes);
+});
+
+// Update uses a fresh complete graph and never copies resolved response tools.
+test("changed instructions update the same assistant with the complete desired graph", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  const desired = { ...DEFINITION, instructions: DEFINITION.instructions + " Keep the test short." };
+  const second = await upsertAssistant(api, store, desired);
+  assert.equal(second.action, "updated"); assert.equal(second.resource.id, first.resource.id);
+  assert.equal(api.items.size, 1);
+  const update = api.calls.find((call) => call.method === "POST" && call.path.endsWith("/" + first.resource.id))!;
+  assert.deepEqual((update.body as typeof DEFINITION).conversation_flow, desired.conversation_flow);
+});
+
+// Canvas reorder and read-only defaults do not trigger repeated writes, while
+// an extra graph step must be removed by a complete graph update.
+test("graph order is irrelevant but extra nodes are corrected by update", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  const flow = api.items.get(first.resource.id)!.conversation_flow as typeof DEFINITION.conversation_flow;
+  flow.nodes.reverse(); flow.edges.reverse();
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "reused");
+  flow.nodes.push({ ...flow.nodes[0], id: "extra" });
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
+});
+
+// Partial or lost POST outcomes reuse the same logical resource/checkpoint.
+test("interrupted assistant creation reuses its key and recovers a lost response", async () => {
+  const store = new Store(); const api = new Registry(store); api.failCreation = true;
+  await assert.rejects(upsertAssistant(api, store, DEFINITION), { code: "network_result_unknown" });
+  const key = store.state.assistant_creation_pending!.idempotency_key;
+  await upsertAssistant(api, store, DEFINITION);
+  assert.deepEqual(api.calls.filter((call) => call.method === "POST").map((call) => call.key), [key, key]);
+  const anotherStore = new Store(); const anotherApi = new Registry(anotherStore); anotherApi.loseCreation = true;
+  assert.equal((await upsertAssistant(anotherApi, anotherStore, DEFINITION)).action, "recovered");
+  assert.equal(anotherApi.calls.filter((call) => call.method === "POST").length, 1);
+});
+
+// A rejected read-back keeps ownership and resumes without creating a duplicate.
+test("assistant readback mismatch retains its id and resumes after correction", async () => {
+  const store = new Store(); const api = new Registry(store); api.badReadback = true;
+  await assert.rejects(upsertAssistant(api, store, DEFINITION), { code: "assistant_readback_mismatch" });
+  assert.equal(store.state.assistant_id, "assistant-created");
+  assert.ok(store.state.assistant_creation_pending);
+  api.badReadback = false;
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "reused");
+  assert.equal(api.calls.filter((call) => call.method === "POST").length, 1);
+});
+
+// Ambiguous names, external-provider conflicts and failed reads cannot create.
+test("duplicate assistants and denied reads stop without resource writes", async () => {
+  const store = new Store(); const api = new Registry(store);
+  await upsertAssistant(api, store, DEFINITION);
+  const writes = api.calls.filter((call) => call.method !== "GET").length;
+  api.items.set("duplicate", { ...structuredClone(api.items.get("assistant-created")!), id: "duplicate" });
+  await assert.rejects(upsertAssistant(api, store, DEFINITION), { code: "duplicate_assistant_matches" });
+  api.items.delete("duplicate"); api.denyRead = true;
+  await assert.rejects(upsertAssistant(api, store, DEFINITION), { http_status: 403 });
+  api.denyRead = false; api.items.get("assistant-created")!.external_llm = { model: "other", base_url: "https://other.invalid" };
+  await assert.rejects(upsertAssistant(api, store, DEFINITION), { code: "stored_assistant_conflict" });
+  assert.equal(api.calls.filter((call) => call.method !== "GET").length, writes);
+});
+
+// Documented complete lists can exceed a page; unexpected partial responses fail.
+test("assistant listing scans complete data arrays and rejects partial pagination", async () => {
+  const store = new Store(); const api = new Registry(store);
+  for (let index = 0; index < 110; index++) api.items.set("unrelated-" + index, { id: "unrelated-" + index, name: "unrelated-" + index });
+  await upsertAssistant(api, store, DEFINITION);
+  assert.equal(api.items.size, 111);
+  const paged: ResourceApi = { async request() { return { data: [], meta: { total_pages: 2, total_results: 2, page_number: 1, page_size: 1 } }; } };
+  await assert.rejects(upsertAssistant(paged, new Store(), DEFINITION), { code: "unexpected_assistant_pagination" });
+});

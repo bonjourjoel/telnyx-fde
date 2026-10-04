@@ -13,7 +13,8 @@ export interface ResourceApi {
 
 // Resource-specific schema, ownership, desired fields, and state tracking.
 export interface ResourceAdapter<T> {
-  kind: string; collection: string; updateMethod: "PUT" | "PATCH"; body: unknown; updateBody?: unknown;
+  kind: string; collection: string; updateMethod: "PUT" | "PATCH" | "POST"; body: unknown; updateBody?: unknown;
+  listMode?: "unpaginated";
   parse(value: unknown): T; id(resource: T): string;
   matches(resource: T): boolean; owns(resource: T): boolean; compliant(resource: T): boolean;
   storedId(state: DeploymentState): unknown;
@@ -70,7 +71,8 @@ async function listMatches<T>(api: ResourceApi, adapter: ResourceAdapter<T>): Pr
   const seen = new Set<string>();
   const matches: T[] = [];
   for (let page = 1; page <= 100; page += 1) {
-    const value = await api.request("GET", adapter.collection + "?" + new URLSearchParams({ "page[size]": "100", "page[number]": String(page) }));
+    const value = await api.request("GET", adapter.listMode === "unpaginated" ? adapter.collection :
+      adapter.collection + "?" + new URLSearchParams({ "page[size]": "100", "page[number]": String(page) }));
     let items: unknown[];
     let meta: z.infer<typeof MetaSchema> | undefined;
     if (Array.isArray(value)) items = value;
@@ -80,7 +82,14 @@ async function listMatches<T>(api: ResourceApi, adapter: ResourceAdapter<T>): Pr
       items = value.data;
       meta = parsed.data;
       if (meta.page_number !== page) throw new TelnyxApiError(`unstable_${adapter.kind}_pagination`);
-    } else throw new TelnyxApiError(`invalid_${adapter.kind}_list`);
+    } else if (adapter.listMode === "unpaginated" && value !== null && typeof value === "object" && "data" in value &&
+      Array.isArray(value.data) && !("meta" in value)) items = value.data;
+    else throw new TelnyxApiError(`invalid_${adapter.kind}_list`);
+    // The Assistants API documents a complete data array without pagination.
+    // A partial paginated response must never establish resource absence.
+    if (adapter.listMode === "unpaginated" && meta && meta.total_pages > 1) {
+      throw new TelnyxApiError(`unexpected_${adapter.kind}_pagination`);
+    }
     for (const item of items) {
       const resource = adapter.parse(item);
       const id = adapter.id(resource);
@@ -92,7 +101,7 @@ async function listMatches<T>(api: ResourceApi, adapter: ResourceAdapter<T>): Pr
       if (seen.size !== meta.total_results) throw new TelnyxApiError(`inconsistent_${adapter.kind}_result_count`);
       return matches;
     }
-    if (!meta && items.length < 100) return matches;
+    if (!meta && (adapter.listMode === "unpaginated" || items.length < 100)) return matches;
     if (items.length === 0) throw new TelnyxApiError(`invalid_${adapter.kind}_page`);
   }
   throw new TelnyxApiError(`${adapter.kind}_list_limit_reached`);
@@ -124,7 +133,7 @@ async function verify<T>(api: ResourceApi, store: DeploymentStateStore, state: D
 }
 
 // Reconcile one resource. Optional updates let the standalone registration
-// check remain non-mutating for existing entries, while deploy sends PUT/PATCH.
+// check remain non-mutating for existing entries, while deploy updates by id.
 export async function upsertResource<T>(api: ResourceApi, store: DeploymentStateStore,
   adapter: ResourceAdapter<T>, updateExisting = true): Promise<UpsertResult<T>> {
   const state = validateDeploymentState(await store.load());
@@ -140,14 +149,21 @@ export async function upsertResource<T>(api: ResourceApi, store: DeploymentState
   const existing = uniqueMatch(await listMatches(api, adapter), adapter);
   if (stored && (!existing || adapter.id(stored) !== adapter.id(existing))) throw new TelnyxApiError(`stored_${adapter.kind}_conflict`);
   if (existing) {
-    await remember(store, state, adapter, existing);
-    if (updateExisting && !adapter.compliant(existing)) {
+    // Lists identify matches and duplicates but can omit managed configuration.
+    // Reuse the already-read detail or fetch it before deciding whether to write.
+    const current = stored ?? adapter.parse(await api.request("GET",
+      adapter.collection + "/" + encodeURIComponent(adapter.id(existing))));
+    if (adapter.id(current) !== adapter.id(existing) || !adapter.owns(current)) {
+      throw new TelnyxApiError(`${adapter.kind}_identity_conflict`);
+    }
+    await remember(store, state, adapter, current);
+    if (updateExisting && !adapter.compliant(current)) {
       const updated = adapter.parse(await api.request(adapter.updateMethod,
-        adapter.collection + "/" + encodeURIComponent(adapter.id(existing)), adapter.updateBody ?? adapter.body));
-      if (adapter.id(updated) !== adapter.id(existing)) throw new TelnyxApiError(`${adapter.kind}_update_changed_id`);
+        adapter.collection + "/" + encodeURIComponent(adapter.id(current)), adapter.updateBody ?? adapter.body));
+      if (adapter.id(updated) !== adapter.id(current)) throw new TelnyxApiError(`${adapter.kind}_update_changed_id`);
       return { action: "updated", resource: await verify(api, store, state, adapter, updated), matching_count: 1 };
     }
-    return { action: "reused", resource: await verify(api, store, state, adapter, existing), matching_count: 1 };
+    return { action: "reused", resource: await verify(api, store, state, adapter, current), matching_count: 1 };
   }
 
   const requestHash = createHash("sha256").update(canonicalJson(adapter.body)).digest("hex");
