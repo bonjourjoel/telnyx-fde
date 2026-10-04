@@ -1233,6 +1233,7 @@ Project root
 | +-- assistant.ts
 | +-- workflow.ts
 | +-- tools.ts
+| +-- telephony.ts
 |
 +-- scripts/
 | +-- deploy.ts
@@ -1240,7 +1241,7 @@ Project root
 | +-- check-mcp.ts
 |
 +-- docs/
-| +-- debugging.md
+| +-- debugging-use-case.txt
 | +-- demo.md
 | +-- verification.md
 |
@@ -1422,8 +1423,8 @@ Tasks:
 
 6. Log validation and signature errors without raw content.
 
-7. Create docs/debugging.md now.
-   Record actual incidents encountered later.
+7. docs/debugging-use-case.txt contains Joel's human documentation.
+   Coding agents must not write in this file.
 
 Validation:
 
@@ -1729,16 +1730,26 @@ Tasks:
    - read_long_answer
 
 Specific documentation issue:
-The MCP API requires name, type, and url, but does not document
-the accepted values for type.
+The MCP API reference uses a generic string for type. The explanatory Voice
+Assistant Quickstart shows HTTP and SSE as transport choices. For our Streamable
+HTTP endpoint, type = "http" was confirmed by a real API creation and GET read-back
+on 2026-10-04. Re-running the registration check reused the same id without POST.
 
 For the initial registration:
 
-- Use the Portal to validate the custom server.
-- Read the created resource back through the API.
-- Keep its id and actual type value.
+- Use the API and deploy.ts for registration and updates; no Portal step is required.
+- Reuse mcp_server_id and mcp_server_type already saved in deployment-state.json.
+- If absent, search before creating with type = "http" and the public /mcp URL.
+- Read the created resource back and verify its exact allowlist and uniqueness.
+- Keep its id and actual type value immediately after creation.
 - Subsequent deployments reuse these values.
 - Do not invent a type value.
+
+The real MCP list response uses a data/meta envelope with pagination. The reader
+supports that observed format and the bare array described by the OpenAPI.
+Registration logic is in scripts/lib/mcp-registration.ts; its check command is
+scripts/check-mcp-registration.ts. Complete the deployment upsert in this step
+without recreating the connection established by the validation check.
 
 4. Create four shared tools in the Tools Library:
 
@@ -1775,12 +1786,23 @@ C. TRANSFER
 Type transfer.
 A single target: the demo technician's phone number.
 Caller ID consistent with the Telnyx configuration.
+Joel explicitly supplied both phone numbers and requested versioned constants,
+not .env fields. Keep them in config/telephony.ts. This overrides the earlier
+local-only phone configuration preference for these two constants. Do not log
+their values or copy them into deployment-state.json. Fixture caller numbers
+remain local-only unless separately instructed.
 
 D. HANGUP
 Type hangup.
 
 5. Keep the four tool identifiers.
 6. Extend deploy.ts to create or update them.
+   Use config/tools.ts to build the desired requests, with project-prefixed
+   display_name values and the required native tool configuration at the root.
+   Use the shared API/state/upsert helpers in scripts/lib/. Compare owned fields
+   with GET responses, but never send read-only shared/id fields back to the API.
+   MCP updates use PUT; shared-tool updates use PATCH. Save each id immediately.
+   Preserve unrelated deployment state, and reconcile failed POSTs before retry.
 
 For shared tools:
 
@@ -1794,6 +1816,10 @@ Validation:
 - The four tools can be retrieved by their ids.
 - The MCP is registered and its tools are available.
 - The configuration contains no plaintext secret.
+- The two explicitly authorized phone constants are versioned; logs and state
+  remain free of their values. The default deployment config needs no phone .env.
+- Local checks cover two synchronizations with stable ids, PUT/PATCH updates,
+  interrupted creation, duplicate rejection, and sanitized REST diagnostics.
 
 Documentation:
 
@@ -2333,7 +2359,10 @@ Demo commands:
 - telnyx-edge metrics <function> --since 1h --json
 
 Real bug:
-Complete docs/debugging.md with:
+Use Joel's account in docs/debugging-use-case.txt for the walkthrough.
+This is human documentation. Coding agents must not write in this file.
+
+Prepare supporting evidence separately:
 
 - Symptom.
 - Affected request or call.

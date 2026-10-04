@@ -1,0 +1,48 @@
+> Human documentation. Coding agents must not write in this file.
+
+---
+
+1) I am at step 8 of development. The assistant tells me it does not know what format the "type" field should have in the mcp_create API request.
+
+2) We decide to run tests. They fail. It tells me it is blocked and that what remains to do must be done manually. This bothers me because I want an idempotent deploy.ts script that I can rerun.
+
+3) I ask where it read the documentation, for the URL and an excerpt, to understand what is blocking it. It gives me this URL:
+https://developers.telnyx.com/api-reference/mcp-servers/create-mcp-server
+This is an API reference.
+
+4) I remember seeing this documentation somewhere. I tell it that it has the wrong documentation and that it needs to read the explanatory documentation for creating an MCP server, rather than the API reference, which seems incomplete.
+
+5) It finds the right value, "http", on this page:
+https://developers.telnyx.com/docs/inference/ai-assistants/no-code-voice-assistant/index#model-context-protocol-mcp-servers
+Using "http" for the "type" field in the MCP registration request (POST /v2/ai/mcp_servers), used by deploy.ts, resolved the HTTP 400 error. The request returned HTTP 200, and running the registration script again reused the same resource without creating a duplicate.
+
+---
+
+Conclusion: the problem was solved thanks to:
+
+a) Having read through the documentation myself before starting, to get an intuition about what is covered and feasible.
+
+b) Having pushed the coding agent to explain the precise blocker, without trusting it blindly.
+
+c) Having used my knowledge and authority to guide it toward a solution.
+
+---
+
+Evidence:
+
+Original API reference doc (incomplete):
+https://developers.telnyx.com/api-reference/mcp-servers/create-mcp-server
+
+Original error (exact log):
+{"method":"POST","endpoint":"/ai/mcp_servers","http_status":400,"detail":"10015; Bad Request; The request failed because it was not well-formed."}
+
+Documentation screenshot showing HTTP and SSE:
+https://developers.telnyx.com/assets/images/mcp_server.png
+
+Correction:
+Changed the MCP registration request's "type" from "custom" to "http".
+
+Observed results (summary, not verbatim console output):
+- Creation: POST returned HTTP 200; action=created; matching_count=1.
+- Second run: GET requests only; action=reused; matching_count=1.
+- Both runs returned the same ID: d4701ec6-2bf2-42eb-80bb-77e81f4171f6.

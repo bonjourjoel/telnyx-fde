@@ -5,7 +5,7 @@
 // run repeatedly: it reuses identifiers stored in deployment-state.json and
 // never resets already-created state.
 //
-// Order (matches ARCHITECTURE.md step 4):
+// Backend provisioning from step 4, plus MCP/shared-tool upserts from step 8:
 //   1. Load .env (Node 24 process.loadEnvFile), confirm TELNYX_API_KEY.
 //   2. Load deployment-state.json (or {}).
 //   3. Resolve the KV namespace by id, then by name, then by creation. Never
@@ -34,8 +34,9 @@
 //  13. Probe GET /health until it is 200 (deployed revision warming up).
 //  14. Probe GET /admin/check-config with the admin secret header and verify
 //      every dependency check passes (KV read + three secrets present).
-//  15. Save deployment-state.json (ids + names only, never secret values).
-//  16. Print the live URL, KV namespace id, and configured secret names.
+//  15. Upsert the existing HTTP MCP connection and four shared tools, checkpoint
+//      every id immediately, and verify their definitions and uniqueness.
+//  16. Save final deployment metadata and print ids/URLs only.
 //
 // All errors are surfaced explicitly. A 401/403/5xx during namespace lookup
 // is treated as an error, never as "resource absent", to avoid accidentally
@@ -53,7 +54,14 @@ import { promisify } from "node:util";
 import { readFile, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { prepareSupportConfig, SUPPORT_CONFIG_KEY } from "../src/support-config";
+import { buildSharedTools, validateTelephony } from "../config/tools";
+import { TELNYX_PHONE_NUMBER, TECHNICIAN_PHONE_NUMBER } from "../config/telephony";
+import { createTelnyxApi, readApiJson, sanitizeDiagnostic, TelnyxApiError, type TelnyxApi } from "./lib/telnyx-api";
+import { createDeploymentStateStore, type DeploymentState } from "./lib/deployment-state";
+import { ensureMcpRegistration } from "./lib/mcp-registration";
+import { syncSharedTools } from "./lib/shared-tools";
 
 const execFileAsync = promisify(execFile);
 
@@ -71,10 +79,6 @@ const ADMIN_SECRET_NAME = "TELNYX_FDE_ADMIN_SECRET";
 const HMAC_SECRET_NAME = "TELNYX_FDE_CALLER_HMAC_KEY";
 const PUBLIC_KEY_NAME = "TELNYX_FDE_PUBLIC_KEY";
 
-// Telnyx REST API base. All REST calls in this script hit this host with the
-// user's TELNYX_API_KEY as a bearer token.
-const API_BASE = "https://api.telnyx.com";
-
 // Local-only state file (gitignored) storing ids and names. Never contains
 // secret values.
 const STATE_FILE = "deployment-state.json";
@@ -91,20 +95,37 @@ const HEALTH_POLL_TIMEOUT_MS = 60000;
 // Ship monitoring timeout. Match the CLI default to give cold builds room.
 const SHIP_TIMEOUT = "10m";
 
+// One atomic repository preserves MCP and tool checkpoints across failures.
+const stateStore = createDeploymentStateStore(STATE_FILE, true);
+
+// Lazily created only after main loads configuration; imports perform no I/O.
+let restApi: TelnyxApi | undefined;
+
+// Known private values and the explicitly versioned phones never reach errors.
+function diagnosticRedactions(): string[] {
+  return [process.env.TELNYX_API_KEY ?? "", process.env.TELNYX_FDE_ADMIN_SECRET ?? "",
+    TELNYX_PHONE_NUMBER, TECHNICIAN_PHONE_NUMBER];
+}
+
+// Reuse the same safe transport for KV, public key, MCP, and shared tools.
+function getRestApi(): TelnyxApi {
+  restApi ??= createTelnyxApi(process.env.TELNYX_API_KEY ?? "", fetch, undefined, diagnosticRedactions());
+  return restApi;
+}
+
+// Check the TypeScript CLI directly, avoiding shell-specific npm executable
+// rules on Windows. Run before any provisioning writes or Function ship.
+async function checkTypeScript(): Promise<void> {
+  try {
+    await execFileAsync(process.execPath, ["node_modules/typescript/bin/tsc", "--noEmit"], { windowsHide: true });
+  } catch {
+    throw new Error("TypeScript verification failed. Run npm.cmd run typecheck to inspect compiler diagnostics.");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-// Persistent deployment state. Identifiers only; no secret values.
-interface DeploymentState {
-  func_id?: string;
-  func_name?: string;
-  func_url?: string;
-  kv_namespace_id?: string;
-  kv_namespace_name?: string;
-  secrets_configured?: string[];
-  last_deployed_at?: string;
-}
 
 // /v2/storage/kvs/{id} response shape (subset we read).
 interface KvNamespaceResource {
@@ -131,93 +152,15 @@ interface PublicKeyResponse {
 // Telnyx REST helpers
 // ---------------------------------------------------------------------------
 
-// Fetch the Telnyx REST API with the bearer token from .env. Throws on a non-
-// 2xx response with the status and a (truncated, sanitized) body snippet so
-// the caller sees the underlying cause.
-async function telnyxFetch(
-  path: string,
-  init?: RequestInit & { expectedStatus?: number[] },
-): Promise<Response> {
-  const apiKey = process.env.TELNYX_API_KEY;
-  if (!apiKey || apiKey.length === 0) {
-    throw new Error(
-      "TELNYX_API_KEY is missing. Copy .env.example to .env and fill in your API key, then re-run `npm run deploy`.",
-    );
-  }
-  // Normalize the caller-supplied headers into a plain record. HeadersInit
-  // may be a Headers object, an array of [key, value] pairs, or a record;
-  // only Headers has a .has() method, so we avoid it entirely and fold every
-  // incoming string-valued header into the final record.
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${apiKey}`,
-  };
-  const incoming = init?.headers;
-  let hasContentType = false;
-  if (incoming) {
-    if (typeof incoming === "string") {
-      // Single string header form; leave to fetch to parse. Cover edge case.
-      const parsed = new Headers(incoming);
-      parsed.forEach((value, key) => {
-        headers[key] = value;
-        if (key.toLowerCase() === "content-type") hasContentType = true;
-      });
-    } else if (Array.isArray(incoming)) {
-      for (const [k, v] of incoming) {
-        if (typeof v === "string") {
-          headers[k] = v;
-          if (k.toLowerCase() === "content-type") hasContentType = true;
-        }
-      }
-    } else if (incoming instanceof Headers) {
-      incoming.forEach((value, key) => {
-        headers[key] = value;
-        if (key.toLowerCase() === "content-type") hasContentType = true;
-      });
-    } else {
-      // HeadersInit also allows a Record<string,string>.
-      for (const [k, v] of Object.entries(incoming)) {
-        if (typeof v === "string") {
-          headers[k] = v;
-          if (k.toLowerCase() === "content-type") hasContentType = true;
-        }
-      }
-    }
-  }
-  // Default Content-Type for JSON bodies, unless the caller already set one.
-  if (init?.body && !hasContentType) {
-    headers["Content-Type"] = "application/json";
-  }
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: init?.method || "GET",
-    body: init?.body,
-    headers,
-  });
-  return res;
+// Raw-response path for KV values; callers distinguish only explicit 404s.
+async function telnyxFetch(path: string, init?: RequestInit): Promise<Response> {
+  return getRestApi().fetch(path, init);
 }
 
-// Fetch and return the parsed JSON body. Throws on a non-2xx status. The error
-// message includes the path, status, and a short body snippet for diagnosis.
+// Safe JSON path for provisioning resources and public-key metadata.
 async function telnyxJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await telnyxFetch(path, init);
-  const text = await res.text();
-  let body: unknown = null;
-  if (text.length > 0) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = text;
-    }
-  }
-  if (!res.ok) {
-    const snippet =
-      typeof body === "string"
-        ? body.slice(0, 200)
-        : JSON.stringify(body).slice(0, 200);
-    throw new Error(
-      `Telnyx ${init?.method || "GET"} ${path} -> ${res.status}: ${snippet}`,
-    );
-  }
-  return body as T;
+  const response = await telnyxFetch(path, init);
+  return await readApiJson(response, init?.method ?? "GET", path, diagnosticRedactions()) as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,22 +341,6 @@ async function upsertEnvKey(key: string, value: string): Promise<void> {
 // deployment-state.json helpers
 // ---------------------------------------------------------------------------
 
-async function loadState(): Promise<DeploymentState> {
-  try {
-    const content = await readFile(STATE_FILE, "utf8");
-    return JSON.parse(content) as DeploymentState;
-  } catch (err: unknown) {
-    const e = err as { code?: string };
-    if (e.code === "ENOENT") return {};
-    throw err;
-  }
-}
-
-async function saveState(state: DeploymentState): Promise<void> {
-  const json = JSON.stringify(state, null, 2) + "\n";
-  await writeFile(STATE_FILE, json, "utf8");
-}
-
 // ---------------------------------------------------------------------------
 // telnyx.toml patching
 // ---------------------------------------------------------------------------
@@ -493,15 +420,16 @@ async function resolveKvNamespace(state: DeploymentState): Promise<string> {
       if (res.ok) {
         const body = (await res.json()) as { data: KvNamespaceResource };
         if (body?.data?.id === state.kv_namespace_id) {
+          if (body.data.name !== KV_NAMESPACE_NAME) throw new Error("Stored KV id does not identify the project's namespace.");
           console.log(
-            `KV namespace found by stored id: ${state.kv_namespace_id} (${body.data.name}).`,
+            `KV namespace found by stored id: ${state.kv_namespace_id}.`,
           );
           return state.kv_namespace_id;
         }
       }
       if (res.status !== 404) {
         throw new Error(
-          `GET /v2/storage/kvs/${state.kv_namespace_id} -> ${res.status}: ${await res.text()}`,
+          `GET /v2/storage/kvs/${state.kv_namespace_id} -> ${res.status}: namespace lookup failed.`,
         );
       }
       // 404 → fall through to name lookup.
@@ -516,6 +444,7 @@ async function resolveKvNamespace(state: DeploymentState): Promise<string> {
 
   // 2. List all namespaces, looking for the configured name.
   let page = 1;
+  const matchingNamespaces: KvNamespaceResource[] = [];
   for (;;) {
     const body = await telnyxJson<KvNamespaceListResponse>(
       `/v2/storage/kvs?page_number=${page}&page_size=100`,
@@ -523,15 +452,17 @@ async function resolveKvNamespace(state: DeploymentState): Promise<string> {
     const items = body.data ?? [];
     for (const item of items) {
       if (item.name === KV_NAMESPACE_NAME) {
-        console.log(
-          `KV namespace found by name "${KV_NAMESPACE_NAME}": ${item.id}.`,
-        );
-        return item.id;
+        matchingNamespaces.push(item);
       }
     }
     const totalPages = body.meta?.total_pages ?? 1;
     if (page >= totalPages) break;
     page += 1;
+  }
+  if (matchingNamespaces.length > 1) throw new Error("Multiple project KV namespaces found; refusing arbitrary selection.");
+  if (matchingNamespaces[0]) {
+    console.log(`KV namespace found by name: ${matchingNamespaces[0].id}.`);
+    return matchingNamespaces[0].id;
   }
 
   // 3. Create the namespace.
@@ -545,7 +476,7 @@ async function resolveKvNamespace(state: DeploymentState): Promise<string> {
   );
   const created = createRes.data;
   if (!created?.id) {
-    throw new Error(`Create KV namespace returned no id: ${JSON.stringify(createRes)}`);
+    throw new Error("Create KV namespace returned no id; inspect the stored deployment context before retrying.");
   }
   console.log(`KV namespace created: ${created.id}.`);
   return created.id;
@@ -800,7 +731,7 @@ async function probeCheckConfig(funcUrl: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  console.log("=== telnyx-fde deploy (step 4) ===");
+  console.log("=== telnyx-fde deploy (through step 8) ===");
 
   // 1. Load .env. process.loadEnvFile is available on Node 24.
   try {
@@ -823,14 +754,18 @@ async function main(): Promise<void> {
     );
   }
   const regenRequested = process.argv.includes("--regen-admin-secret");
+  validateTelephony();
+  await checkTypeScript();
+  console.log("TypeScript verification passed.");
 
   // 2. State.
-  const state = await loadState();
+  let state = await stateStore.load();
 
   // 3. KV namespace.
   const kvId = await resolveKvNamespace(state);
   state.kv_namespace_id = kvId;
   state.kv_namespace_name = KV_NAMESPACE_NAME;
+  await stateStore.save(state);
 
   // 4. Poll provisioning before any write.
   await pollKvProvisioning(kvId);
@@ -875,6 +810,7 @@ async function main(): Promise<void> {
   }
   const funcUrl = await getInvokeUrl(state.func_name);
   state.func_url = funcUrl;
+  await stateStore.save(state);
   console.log(`Function URL: ${funcUrl}`);
 
   // 13. /health probe.
@@ -883,10 +819,22 @@ async function main(): Promise<void> {
   // 14. /admin/check-config probe.
   await probeCheckConfig(funcUrl);
 
-  // 15. Save state.
+  // 15. Upsert the existing MCP connection, then four shared native tools.
+  // Helpers checkpoint each id immediately and reread resources before success.
+  const tools = buildSharedTools(funcUrl, state.func_name);
+  const mcp = await ensureMcpRegistration(getRestApi(), stateStore, {
+    name: state.func_name + "-faq", candidate_type: "http", url: new URL("/mcp", funcUrl).href,
+    allowed_tools: ["list_topics", "read_short_answer", "read_long_answer"],
+  }, true);
+  console.log(JSON.stringify({ operation: "mcp_upsert", action: mcp.action, id: mcp.server.id }));
+  const sharedTools = await syncSharedTools(getRestApi(), stateStore, tools);
+  for (const tool of sharedTools) console.log(JSON.stringify({ operation: "shared_tool_upsert", ...tool }));
+
+  // Reload the helpers' durable state before adding final deployment metadata.
+  state = await stateStore.load();
   state.secrets_configured = [ADMIN_SECRET_NAME, HMAC_SECRET_NAME, PUBLIC_KEY_NAME];
   state.last_deployed_at = new Date().toISOString();
-  await saveState(state);
+  await stateStore.save(state);
   console.log(`Saved ${STATE_FILE}.`);
 
   // 16. Summary.
@@ -895,6 +843,8 @@ async function main(): Promise<void> {
   console.log(`Function URL : ${funcUrl}`);
   console.log(`KV namespace : ${kvId} (${KV_NAMESPACE_NAME})`);
   console.log(`KV config key: ${SUPPORT_CONFIG_KEY}`);
+  console.log(`MCP id       : ${state.mcp_server_id}.`);
+  console.log(`Shared tools : ${sharedTools.length} verified (identifiers saved).`);
   console.log(
     `Secrets      : ${state.secrets_configured.join(", ")} (values never displayed).`,
   );
@@ -904,14 +854,35 @@ async function main(): Promise<void> {
   console.log(
     `Diagnostic   : curl -H "x-admin-secret: <admin secret>" ${funcUrl.replace(/\/+$/, "")}/admin/check-config`,
   );
-  console.log("Done.");
 }
 
-main().catch((err: unknown) => {
-  const e = err as { message?: string; stack?: string };
-  console.error("");
-  console.error("DEPLOY FAILED:");
-  console.error(e.message || String(err));
-  if (e.stack) console.error(e.stack);
-  process.exit(1);
-});
+// Importing deploy helpers/tests never loads .env, deploys, or issues API calls.
+// Only fixed/scrubbed diagnostics are emitted; no full response or stack dump.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  // Show the PC's local clock, but measure elapsed time with a monotonic clock.
+  const localStart = new Date();
+  const startedAt = performance.now();
+  const localTime = [localStart.getHours(), localStart.getMinutes(), localStart.getSeconds()]
+    .map((part) => String(part).padStart(2, "0")).join(":");
+  console.log(`Started at: ${localTime} (local time)`);
+  let succeeded = false;
+
+  main().then(() => {
+    succeeded = true;
+  }).catch((error: unknown) => {
+    if (error instanceof TelnyxApiError) {
+      console.error(JSON.stringify({ operation: "deploy", outcome: "error", code: error.code,
+        method: error.method, endpoint: sanitizeDiagnostic(error.endpoint ?? "", diagnosticRedactions()),
+        http_status: error.http_status, detail: error.detail }));
+    } else {
+      console.error("DEPLOY FAILED: " + sanitizeDiagnostic(error instanceof Error ? error.message : "Unknown error", diagnosticRedactions()));
+    }
+    process.exitCode = 1;
+  }).finally(() => {
+    // Duration and the explicit result are always the last two output lines.
+    // Use stderr on failure so diagnostics and the final result stay ordered.
+    const printResult = succeeded ? console.log : console.error;
+    printResult(`Deployment duration: ${((performance.now() - startedAt) / 1000).toFixed(1)}s`);
+    printResult(succeeded ? "✅ DEPLOYMENT SUCCESS" : "❌ DEPLOYMENT FAILURE");
+  });
+}

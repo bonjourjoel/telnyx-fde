@@ -25,6 +25,9 @@ A Telnyx Edge **StatefulActor** project, scaffolded with `telnyx-edge new-func -
 | `src/faq.ts` | Verified catalogue of 12 public documentation topics with voice-length explanations. |
 | `src/mcp.ts` | Official SDK MCP endpoint with exactly three tools and no business resource access. |
 | `scripts/check-mcp.ts` / `scripts/check-mcp.test.ts` | Official client verification and sequential offline protocol checks. |
+| `config/telephony.ts` | Explicitly authorized phone constants for the assistant and technician. |
+| `config/tools.ts` | Desired definitions of the four shared native tools. |
+| `scripts/lib/` | Shared safe REST client, atomic state, and resource upsert adapters. |
 | `package.json` / `tsconfig.json` | TypeScript project configuration. |
 
 ## Deploy
@@ -387,8 +390,56 @@ and loopback hosts are allowlisted in `src/mcp.ts`. If hosting changes, update
 that list to the actual hostname. Server-to-server clients need no Origin header;
 present browser origins are rejected because no browser MCP caller is configured.
 
-Telnyx MCP registration remains step 8 and the phone/Portal workflow's FAQ branch
-remains step 12. Local protocol checks do not establish those integrations.
+The HTTP MCP connection was registered and verified by API during the step 8
+precheck; its id/type are saved in private deployment state. The workflow's FAQ
+branch remains step 12. Local protocol checks do not establish that integration.
 The SDK integration follows its official
 [web-standard serving guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/serving/web-standard.md)
 and [client testing guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/testing.md).
+
+## MCP and shared-tool deployment (step 8)
+
+`npm.cmd run deploy` now ships/checks the backend, upserts the HTTP MCP connection,
+then synchronizes `SET_SUPPORT_VARIABLES`, `CREATE_TICKET`, `TRANSFER`, and
+`HANGUP` through the account API. It retains the already-registered MCP id.
+Assistant/workflow creation remains a later step.
+
+Definitions come from `config/tools.ts`. The variable updater exposes only the
+five keys in `WRITABLE_DYNAMIC_VARIABLE_KEYS`. The synchronous creation webhook
+has only subject and description as model arguments; channel, caller target, and
+operation id are preset. Response mappings use `name` and `value_path`. Transfer
+has one destination and a fixed caller ID. Joel explicitly requested both phone
+values as constants in `config/telephony.ts`; neither is read from `.env`.
+
+The shared algorithm first reads a saved id and fully lists matching resources.
+It stops on failed reads, conflicting ownership, duplicates, or malformed local
+state. A missing resource is created with an idempotency key saved before POST.
+Returned ids are checkpointed immediately, then verified by GET and a uniqueness
+check. Changes use MCP PUT or tool PATCH with the same id; already matching
+definitions are reused without another write. Each tool has its own pending key,
+so partial deployments resume safely. Unknown/expired POST outcomes are not
+silently replaced with new creation keys.
+
+`deployment-state.json` stores identifiers and request fingerprints, not phone
+values or credentials. API errors expose controlled endpoint/status diagnostics;
+the known phones and credentials are redacted. Responses, request payloads, and
+stack traces are not printed. Existing KV config, web demo identity, HMAC key,
+and Actor storage remain preserved by the deployment path.
+
+Local verification (no `.env`, API account, deployment, or phone call):
+
+```powershell
+npm.cmd run typecheck
+node --import tsx --test --test-concurrency=1 scripts/check-caller-tickets.ts scripts/check-http.ts scripts/check-mcp.test.ts scripts/check-mcp-registration.test.ts scripts/check-resource-upsert.test.ts
+```
+
+The resource tests simulate two sequential synchronizations, definition changes,
+lost responses, partial creation, denied reads, duplicate names, malformed id
+maps, and redaction. They do not prove native tools were accepted by the live API.
+The new step 8 deployment has not been executed as part of this local coding step.
+Its two real deployment runs and read-back checks remain separate verification.
+
+Native request contracts follow the official
+[Tools Library](https://developers.telnyx.com/docs/inference/ai-assistants/tools-library),
+[Preset Webhook Parameters](https://developers.telnyx.com/docs/inference/ai-assistants/preset-webhook-parameters),
+and [Telnyx OpenAPI](https://github.com/team-telnyx/openapi/blob/master/openapi/spec3.json).
