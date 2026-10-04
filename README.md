@@ -525,8 +525,12 @@ Categories distinguish authentication, permission, network, timeout, invalid
 response/configuration and a missing binding. Failure still returns HTTP 500.
 
 During the Portal investigation, the namespace/configuration read returned 200
-directly, but reading through the Function binding failed. The new diagnostics
-must be deployed to identify that upstream failure; it is not yet repaired.
+directly, but reading through the Function binding failed. The deployed diagnostic
+identified upstream HTTP 401 (authentication). The manifest now explicitly
+declares `[telnyx] binding = "TELNYX"`, requesting Telnyx's authenticated API wiring
+on ship. This targets the runtime credential path used by the SDK's KV client;
+the namespace id and stored values are preserved. The effect on the 401 still
+requires a real deployment and configuration read-back.
 The CLI had no default binding id configured locally, which alone establishes
 neither absence nor invalidity of the server-side binding. Do not reset resources
 or rotate credentials based on that local metadata gap.

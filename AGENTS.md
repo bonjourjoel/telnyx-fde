@@ -1462,9 +1462,12 @@ src/kv-errors.ts classifies dependency failures using fixed categories and the
 SDK's HTTP status only. readSupportConfig wraps exceptions without retaining raw
 messages or causes. Protected /admin/check-config returns kv.error.code and an
 optional upstream_status; kv_read logs contain the same safe category/status.
-The direct KV REST read succeeded while the Function binding failed. The runtime
-failure is not repaired yet: deploy this diagnostic and inspect its result before
-changing authentication, permissions or binding configuration. A missing binding
+The direct KV REST read succeeded while the Function binding failed. Joel's next
+deployment identified upstream HTTP 401 (authentication). telnyx.toml now declares
+[telnyx] binding = "TELNYX" to request authenticated API wiring during ship. Local
+types were regenerated; the effect on the runtime 401 is not yet verified by a
+real deployment. Namespace, values, caller HMAC and resource ids are preserved.
+A missing binding
 id in the local CLI configuration does not prove the server binding is absent.
 
 Title: Logs

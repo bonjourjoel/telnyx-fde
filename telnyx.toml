@@ -14,6 +14,11 @@ type = "CallerTickets"
 [storage.kv.SUPPORT_CONFIG]
 id = "c73e15c6-ce32-4306-ad0a-192deceb7d0f"
 
+# Explicit authenticated API access for runtime storage requests.
+# Telnyx wires the organization credential on ship; no API key is embedded.
+[telnyx]
+binding = "TELNYX"
+
 [edge_compute]
 func_id = "0768c5c4-b3f2-49a5-b243-21aa1981725e"
 func_name = "telnyx-fde"

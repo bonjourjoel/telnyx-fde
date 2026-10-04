@@ -2,11 +2,13 @@
 
 import type { ActorNamespace as __TelnyxActorNamespace, KvNamespace as __TelnyxKvNamespace } from "@telnyx/edge-runtime";
 import type { Counter, CallerTickets } from "./src/index";
+import type { default as __TelnyxClient } from "telnyx";
 
 declare global {
   interface Env {
     COUNTER: __TelnyxActorNamespace<Counter>;
     CALLER_TICKETS: __TelnyxActorNamespace<CallerTickets>;
+    TELNYX: __TelnyxClient;
     SUPPORT_CONFIG: __TelnyxKvNamespace;
   }
 }
@@ -15,6 +17,7 @@ declare module "@telnyx/edge-runtime" {
   interface Env {
     COUNTER: __TelnyxActorNamespace<Counter>;
     CALLER_TICKETS: __TelnyxActorNamespace<CallerTickets>;
+    TELNYX: __TelnyxClient;
     SUPPORT_CONFIG: __TelnyxKvNamespace;
   }
 }
