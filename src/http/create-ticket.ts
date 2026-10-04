@@ -2,8 +2,8 @@
 // from preset tool fields; only confirmed, persisted actor results yield 200.
 
 import { validateSubject, validateDescription, validateOperationId, type CreateTicketResponse } from "../contracts";
-import { computeCallerKey } from "../security";
-import { HttpError, observe, signedJson, type HttpContext } from "./common";
+import { resolveSupportActorKey } from "../identity";
+import { HttpError, observe, requestIdentity, signedJson, type HttpContext } from "./common";
 
 // Validate before actor access; explicitly translate the HTTP names to actor
 // business input. Never forward caller_phone into persistent ticket storage.
@@ -14,8 +14,7 @@ export async function handleCreateTicket(req: Request, context: HttpContext): Pr
   const operation = validateOperationId(typeof body.operation_id === "string" ? body.operation_id : undefined);
   if (!subject.ok || !description.ok || !operation.ok) throw new HttpError(400, "invalid_ticket_fields");
   if (!context.secrets.caller_hmac_key) throw new HttpError(503, "identity_unavailable");
-  const phone = typeof body.caller_phone === "string" ? body.caller_phone : null;
-  const key = await computeCallerKey(phone, context.secrets.caller_hmac_key);
+  const key = await resolveSupportActorKey(requestIdentity(body), context.env, context.secrets.caller_hmac_key);
   if (!key) throw new HttpError(422, "caller_identity_unusable");
   const result = await observe(context, "actor_create_ticket", () =>
     context.env.CALLER_TICKETS.idFromName(key).createTicket({

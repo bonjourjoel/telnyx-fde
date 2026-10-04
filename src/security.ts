@@ -229,6 +229,22 @@ export async function computeTicketOperationId(
   );
 }
 
+// Separate web demo records from every phone HMAC without changing existing
+// phone actor keys. Only a backend-configured label may be passed here.
+export async function computeWebDemoKey(identity: string, hmacSecret: string): Promise<string> {
+  return hmacDigest("support-web-demo:v1:" + JSON.stringify(identity), hmacSecret);
+}
+
+// The documented initialization event id is an event identifier, not a
+// guaranteed native web session id. Replaying that event derives the same
+// operation; missing ids disable creation instead of generating random ids.
+export async function computeWebTicketOperationId(
+  actorKey: string, initializationEventId: unknown, hmacSecret: string | undefined,
+): Promise<string | null> {
+  if (typeof initializationEventId !== "string" || !initializationEventId.trim() || !hmacSecret) return null;
+  return hmacDigest("support-web-ticket:v1:" + JSON.stringify([actorKey, initializationEventId]), hmacSecret);
+}
+
 // Shared HMAC implementation for opaque caller and operation identifiers.
 async function hmacDigest(value: string, secret: string): Promise<string> {
   // Import the stable secret without retaining raw identity in actor state.

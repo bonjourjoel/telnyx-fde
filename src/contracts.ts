@@ -211,16 +211,31 @@ export interface PresentableTicket {
 // Create-ticket webhook contract (POST /tickets/create)
 // ---------------------------------------------------------------------------
 
-// Body sent by the CREATE_TICKET shared tool. ticket_subject and
-// ticket_description come from the model's collected values; caller_phone and
-// operation_id come from preset body fields configured on the tool, so the
-// model cannot choose or forge them.
-export interface CreateTicketRequest {
+// Voice channels supported by this backend. Portal test voice uses web_call;
+// this is distinct from web chat and the separate WebSocket conversation API.
+export type SupportChannel = "phone_call" | "web_call";
+
+// Narrow a channel received in a signed payload or protected admin request.
+export function isSupportChannel(value: unknown): value is SupportChannel {
+  return value === "phone_call" || value === "web_call";
+}
+
+// Caller selection comes from native preset values. A web request never chooses
+// its demo identity; the backend reads that identity from its KV configuration.
+export type SupportIdentityRequest =
+  | { conversation_channel: "phone_call"; caller_phone: string }
+  | { conversation_channel: "web_call"; caller_phone?: string };
+
+// Body sent by the CREATE_TICKET shared tool. Only subject and description are
+// model inputs; channel, caller_phone, and operation_id are preset fields.
+export type CreateTicketRequest = SupportIdentityRequest & {
   ticket_subject: string;
   ticket_description: string;
-  caller_phone: string;
   operation_id: string;
-}
+};
+
+// Protected preparation input selects phone or backend-configured web records.
+export type SeedDemoRequest = SupportIdentityRequest & SeedDemoTicketsInput;
 
 // Success response (HTTP 200). The stored identifiers are mirrored into the
 // conversation as variables by the tool's store_fields_as_variables config.

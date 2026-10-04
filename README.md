@@ -19,6 +19,7 @@ A Telnyx Edge **StatefulActor** project, scaffolded with `telnyx-edge new-func -
 | `scripts/check-caller-tickets.ts` | Sequential local actor checks with synthetic inputs and a storage double. |
 | `src/http/` | Shared callback security/logging boundaries and the initialization, creation, and administration handlers. |
 | `src/support-config.ts` | Shared strict KV feature-flag reader. |
+| `src/identity.ts` | Common phone/web actor identity resolution for initialization, creation, and fixtures. |
 | `scripts/check-http.ts` | Offline signed HTTP integration scenarios and log sanitization checks. |
 | `scripts/seed-demo.ts` | Explicit fixture preparation command, separate from deployment. |
 | `package.json` / `tsconfig.json` | TypeScript project configuration. |
@@ -49,10 +50,11 @@ through the binding. Generate the `env.COUNTER` types (`Env`) with
 ## Caller tickets (step 5)
 
 `CALLER_TICKETS` maps to the exported `CallerTickets` class. Each instance owns
-one caller's records. In step 6, the Function will resolve the instance through
-`env.CALLER_TICKETS.idFromName(callerKey)`, using the existing stable HMAC of the
-normalized phone number. Neither the actor input nor its stored state contains
-the raw phone number. The business HTTP routes now use this actor; assistant
+one identity's records. The Function resolves it through
+`env.CALLER_TICKETS.idFromName(actorKey)`. Phone calls retain the existing HMAC of
+the normalized phone number; Portal web calls use a separate HMAC namespace and
+the backend-configured demo label. Neither the actor input nor stored state
+contains the raw phone number. The business HTTP routes now use this actor; assistant
 configuration and real callback verification remain later integration work.
 
 The actor exposes three methods:
@@ -140,13 +142,14 @@ The documented callback is an event envelope:
 }
 ```
 
-The handler reads caller tickets and `support/config`. It presents open tickets
+The handler accepts `phone_call` and `web_call`. It reads identity tickets and
+`support/config`. It presents open tickets
 or records updated within 30 days, orders by most recent update, and limits the
 result to three. `tickets_count` is the displayed count. `tickets_json` excludes
 description and operation id. A successful read with tickets produces a greeting
 offering follow-up; a successful empty read produces the generic question greeting.
 
-Missing/unusable caller identity never creates a shared anonymous actor. A KV or
+Missing/unusable phone identity never creates a shared anonymous actor. A KV or
 actor failure returns 200 with complete safe defaults: `init_ok=false`,
 `can_create_ticket=false`, flag false, no creation operation, and a generic
 greeting. The zero count in this fallback is not evidence of an empty record set;
@@ -155,16 +158,54 @@ initialization as an error even though its HTTP response delivers valid defaults
 Rejected signatures/envelopes use non-200 responses; the assistant must also have
 the defaults configured for transport errors/timeouts.
 
-With a valid caller and successful reads, `init_ok=true`. Missing call context
-still allows ticket follow-up but disables creation. Otherwise `operation_id` is
-a domain-separated HMAC of the caller key and `call_control_id`. A new delivery
-event id does not change it; another call or caller does. The raw call id is not
-returned or logged. Default variables are defined in `src/contracts.ts`.
+With a valid identity and successful reads, `init_ok=true`. Missing phone call
+context still allows follow-up but disables creation. Phone `operation_id` stays
+a domain-separated HMAC of the caller key and `call_control_id`; another delivery
+event id does not change it.
+
+For Portal `web_call`, the actor key comes only from `web_demo_identity` in KV.
+The initialization event's documented `data.id` determines a separate operation
+HMAC. Replaying the same event preserves the operation; a different event gets a
+new operation on the same demo Actor. This is an event id, not a guaranteed native
+web session id. No `conversation_id` or `session_id` is assumed in this webhook.
+If `data.id` is absent, empty, or not a string, return an empty `operation_id` and
+`can_create_ticket=false`. Successful reads and ticket follow-up remain available.
+No random operation id is generated. Neither raw call/event ids nor the demo
+label are returned or logged. Default variables are in `src/contracts.ts`.
+
+### Stable Portal demo identity
+
+Backend configuration in the existing `support/config` KV key is:
+
+```json
+{
+  "technician_available": false,
+  "web_demo_identity": "portal-demo"
+}
+```
+
+This label is explicit backend configuration, not a caller number or a writable
+assistant variable. Initialization, creation, and fixture preparation all use
+`resolveSupportActorKey`. For web calls, caller targets and request-selected demo
+labels are ignored. Without a valid backend demo identity, web actor operations
+fail safely. Phone actor keys remain unchanged and isolated from web demo records.
+
+The deployment script initializes missing configuration fields only. It adds
+the demo label to legacy configuration if absent, preserving the flag and other
+fields. It never replaces a configured label; invalid existing configuration is
+reported rather than reset. The HMAC secret is also preserved. Changing either
+identity input deliberately would select different state. Raw configuration is
+not printed by deployment. The updated script has not been deployed in this step.
+
+A real Portal smoke test must still verify the signed callback, the presence of
+`data.id`, distinct event ids on new runs, and ticket retrieval between runs.
+Do not treat local fixtures as proof of that real callback behavior.
 
 ### Creation input
 
 ```json
 {
+  "conversation_channel": "phone_call",
   "ticket_subject": "Webhook integration question",
   "ticket_description": "A concise support request without credentials.",
   "caller_phone": "CALLER_E164_NUMBER",
@@ -173,15 +214,32 @@ returned or logged. Default variables are defined in `src/contracts.ts`.
 ```
 
 The flat body matches Telnyx webhook tool callbacks. Subject and description are
-validated to 100 and 1,500 characters. `caller_phone` and `operation_id` must be
-preset configuration fields in the later assistant tool setup, not model-selected
-arguments. Initialization and creation use the same `computeCallerKey` function.
+validated to 100 and 1,500 characters. `conversation_channel`, `caller_phone`, and
+`operation_id` must be preset fields in the later assistant tool setup, not
+model-selected arguments. Initialization and creation share the identity resolver.
 Only business fields reach the actor. Repeated operations return the same ticket.
 No automatic retry is performed by this handler.
 
+The future tool presets are:
+
+```json
+{
+  "conversation_channel": "{{telnyx_conversation_channel}}",
+  "caller_phone": "{{telnyx_end_user_target}}",
+  "operation_id": "{{operation_id}}"
+}
+```
+
+These are our backend request fields populated by documented Telnyx variables.
+For `web_call`, `caller_phone` is ignored and may be absent: the backend chooses
+the configured demo Actor. Only subject and description are business arguments.
+The demo identity must never be a tool argument or a model-editable variable.
+
 ### Demo preparation
 
-The admin body is `{ "caller_phone": "...", "tickets": [...] }`, with the
+The web admin body is `{ "conversation_channel": "web_call", "tickets": [...] }`.
+For phone fixtures, use `{ "conversation_channel": "phone_call", "caller_phone":
+"...", "tickets": [...] }`. Both use the shared resolver and the
 fixture fields described above. Every fixture is validated by the actor before
 the batch is written. The endpoint requires the project administration secret
 and is never configured as an assistant tool.
@@ -190,7 +248,8 @@ To prepare a real demo later, explicitly run these PowerShell commands:
 
 ```powershell
 Copy-Item -LiteralPath seed-demo.example.json -Destination seed-demo.local.json
-# Edit the local file: real Function HTTPS origin and your test E.164 number.
+# Edit the local file: real Function HTTPS origin. The example uses web_call.
+# For phone_call only, add caller_phone privately with your test E.164 number.
 # Keep fixture operation ids stable. Choose dates appropriate for your demo.
 node --import tsx scripts/seed-demo.ts
 ```
@@ -200,6 +259,9 @@ secret from `.env` or the shell only when run directly. It has a 10-second HTTP
 timeout, refuses redirects, and outputs counts or a sanitized HTTP status. It is
 not invoked by deployment and was not run against a public URL in this step.
 Replaying fixtures leaves their existing content, dates, and statuses unchanged.
+Web fixtures and all Portal smoke tests share the configured demo Actor, so a
+ticket created during one run can be retrieved during a later run. The local file
+must never supply web_demo_identity; it is configured only on the backend.
 
 ### Local verification and logs
 
@@ -212,6 +274,9 @@ HTTP checks run entirely in-process with ephemeral Ed25519 keys, fictional calle
 data, an actor namespace double, and KV/storage doubles. They verify raw-body
 signatures, timestamp rejection, stable identity/operation ids, ticket selection,
 creation/replay/retrieval, fallback behavior, admin protection, and sanitized logs.
+They also cover shared web Actor identity, distinct/replayed initialization event
+ids, missing web ids, missing demo configuration, and preservation of configuration
+across repeated provisioning preparations. Phone and web records remain separate.
 Fixture-script HTTP calls are replaced by an injected offline sender. Neither
 test file loads `.env` or accesses an account. This does not prove cloud binding
 behavior, callback delivery, or a phone workflow; those require later real tests.
@@ -226,3 +291,7 @@ Contracts were checked against the supplied Dynamic Variables document and the
 official [AI Assistant backend guide](https://developers.telnyx.com/docs/edge-compute/guides/ai-assistant-backend),
 [webhook fundamentals](https://developers.telnyx.com/docs/development/api-fundamentals/webhooks/receiving-webhooks),
 and [preset webhook parameters](https://developers.telnyx.com/docs/inference/ai-assistants/preset-webhook-parameters).
+Portal channel semantics were checked in
+[Conversation Keying](https://developers.telnyx.com/docs/inference/ai-assistants/conversation-keying).
+Web event-id deduplication follows the documented webhook envelope and duplicate
+handling guidance; native Portal session-id availability has not been established.

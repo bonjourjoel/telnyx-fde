@@ -3,10 +3,11 @@
 
 import {
   DEFAULT_INIT_DYNAMIC_VARIABLES, PRESENTABLE_TICKETS_LIMIT, RECENT_TICKET_WINDOW_DAYS,
-  isValidIsoDate, type InitDynamicVariables, type PresentableTicket, type Ticket,
+  isValidIsoDate, isSupportChannel, type InitDynamicVariables, type PresentableTicket, type Ticket,
 } from "../contracts";
 import { OUTCOME } from "../logging";
-import { computeCallerKey, computeTicketOperationId } from "../security";
+import { computeTicketOperationId, computeWebTicketOperationId } from "../security";
+import { resolveSupportActorKey } from "../identity";
 import { readSupportConfig } from "../support-config";
 import { HttpError, isObject, observe, signedJson, type HttpContext } from "./common";
 
@@ -37,7 +38,8 @@ export async function handleInit(req: Request, context: HttpContext): Promise<Re
   }
   const payload = data.payload;
   const variables: InitDynamicVariables = { ...DEFAULT_INIT_DYNAMIC_VARIABLES };
-  if (payload.telnyx_conversation_channel !== "phone_call") {
+  const channel = payload.telnyx_conversation_channel;
+  if (!isSupportChannel(channel)) {
     context.outcome = OUTCOME.REJECTED;
     context.error_code = "ValidationError";
     return Response.json({ dynamic_variables: variables });
@@ -45,16 +47,23 @@ export async function handleInit(req: Request, context: HttpContext): Promise<Re
 
   // Read independent dependencies even when one fails, so both failures are
   // observable. No raw call id, phone, ticket text, or full payload is logged.
+  const configuration = observe(context, "kv_read", () => readSupportConfig(context.env));
   const results = await Promise.allSettled([
-    observe(context, "kv_read", () => readSupportConfig(context.env)),
+    configuration,
     observe(context, "actor_context_read", async () => {
-      if (!context.secrets.caller_hmac_key) throw new HttpError(503, "identity_unavailable");
-      const phone = typeof payload.telnyx_end_user_target === "string" ? payload.telnyx_end_user_target : null;
-      const key = await computeCallerKey(phone, context.secrets.caller_hmac_key);
+      const identity = channel === "web_call" ? { conversation_channel: channel } : {
+        conversation_channel: channel,
+        caller_phone: typeof payload.telnyx_end_user_target === "string" ? payload.telnyx_end_user_target : "",
+      };
+      const key = await resolveSupportActorKey(identity, context.env, context.secrets.caller_hmac_key,
+        channel === "web_call" ? await configuration : undefined);
       if (!key) throw new HttpError(422, "caller_identity_unusable");
       const callId = typeof payload.call_control_id === "string" ? payload.call_control_id : null;
-      const operationId = await computeTicketOperationId(key, callId, context.secrets.caller_hmac_key);
-      // No actor lookup for callers lacking a usable phone identity.
+      const operationId = channel === "web_call"
+        ? await computeWebTicketOperationId(key, data.id, context.secrets.caller_hmac_key)
+        : await computeTicketOperationId(key, callId, context.secrets.caller_hmac_key);
+      // Web reads remain available when an event id is missing, but creation
+      // is disabled. No random id or fake native session field is substituted.
       const tickets = presentTickets(await context.env.CALLER_TICKETS.idFromName(key).listTickets());
       return { tickets, operationId };
     }),

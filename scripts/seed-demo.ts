@@ -5,6 +5,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { normalizePhoneE164 } from "../src/security";
+import { isSupportChannel } from "../src/contracts";
 import { HttpError, isObject } from "../src/http/common";
 
 // Fixed, ignored local file. Copy seed-demo.example.json and fill it privately.
@@ -33,9 +34,13 @@ export async function submitDemoFixtures(
 ): Promise<number> {
   if (!secret) throw new Error("administration secret is missing");
   if (!isObject(config) || typeof config.base_url !== "string" ||
-    typeof config.caller_phone !== "string" || !normalizePhoneE164(config.caller_phone) ||
+    !isSupportChannel(config.conversation_channel) ||
     !Array.isArray(config.tickets)) {
     throw new Error("invalid local fixture configuration");
+  }
+  if (config.conversation_channel === "phone_call" &&
+    (typeof config.caller_phone !== "string" || !normalizePhoneE164(config.caller_phone))) {
+    throw new Error("invalid local phone fixture identity");
   }
   const base = new URL(config.base_url);
   if (base.protocol !== "https:" || base.username || base.password ||
@@ -45,7 +50,10 @@ export async function submitDemoFixtures(
   const response = await send(new URL("/admin/seed", base), {
     method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
     headers: { "Content-Type": "application/json", "x-admin-secret": secret },
-    body: JSON.stringify({ caller_phone: config.caller_phone, tickets: config.tickets }),
+    body: JSON.stringify({ conversation_channel: config.conversation_channel,
+      ...(config.conversation_channel === "phone_call" ? { caller_phone: config.caller_phone } : {}),
+      tickets: config.tickets,
+    }),
   });
   if (response.status !== 200) throw new HttpError(response.status, "seed_request_failed");
   const result: unknown = await response.json();

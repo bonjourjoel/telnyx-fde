@@ -1,6 +1,6 @@
 {
   "base_url": "https://YOUR_FUNCTION.telnyxcompute.com",
-  "caller_phone": "REPLACE_WITH_YOUR_E164_TEST_NUMBER",
+  "conversation_channel": "web_call",
   "tickets": [
     {
       "subject": "Webhook signature troubleshooting",

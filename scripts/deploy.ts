@@ -12,8 +12,8 @@
 //      create a duplicate of an existing namespace named
 //      telnyx-fde-support-config.
 //   4. Poll provision_ok before any write.
-//   5. Seed support/config = {"technician_available":false} ONLY when the
-//      key is absent. A previously set true or false is preserved.
+//   5. Initialize missing support/config fields, including a stable web demo
+//      identity. Existing flags, demo identity, and other fields are preserved.
 //   6. Admin secret (hybrid, .env priority): use the value from .env if
 //      present; otherwise generate one, persist it to .env, and push to
 //      Telnyx. If the secret exists at Telnyx but .env has lost it, fail
@@ -53,6 +53,7 @@ import { promisify } from "node:util";
 import { readFile, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import { prepareSupportConfig, SUPPORT_CONFIG_KEY } from "../src/support-config";
 
 const execFileAsync = promisify(execFile);
 
@@ -63,8 +64,6 @@ const execFileAsync = promisify(execFile);
 // Project-level constants. KV namespace name and the config key are stable
 // across deployments; renaming them would orphane previously written state.
 const KV_NAMESPACE_NAME = "telnyx-fde-support-config";
-const SUPPORT_CONFIG_KEY = "support/config";
-const SEED_CONFIG_VALUE = JSON.stringify({ technician_available: false });
 
 // Secret names use a project-prefixed scheme to avoid clashing with other
 // functions in the same organization (secrets are org-scoped).
@@ -580,37 +579,42 @@ async function pollKvProvisioning(namespaceId: string): Promise<void> {
   }
 }
 
-// Seed support/config ONLY when the key is absent. We GET the key; a 404 means
-// absent and triggers the PUT. Any other non-2xx is an error. If the key
-// already exists (technician_available true or false), it is preserved.
+// Fill only missing configuration fields. An existing web identity must survive
+// every redeployment, just like the technician flag and the caller HMAC secret.
+// Never print raw configuration: unrelated fields may contain private values.
 async function seedSupportConfig(namespaceId: string): Promise<void> {
   const keyUrl = `/v2/storage/kvs/${encodeURIComponent(namespaceId)}/keys/${encodeURIComponent(
     SUPPORT_CONFIG_KEY,
   )}`;
   const res = await telnyxFetch(keyUrl);
+  let existing: unknown = undefined;
   if (res.ok) {
-    const body = await res.text();
-    console.log(
-      `support/config already exists; preserving current value (${body}).`,
+    try {
+      existing = await res.json();
+    } catch {
+      throw new Error("support/config contains invalid JSON; refusing to replace it.");
+    }
+  } else if (res.status !== 404) {
+    throw new Error(
+      `GET ${keyUrl} -> ${res.status}: configuration lookup failed (not treated as absent).`,
     );
+  }
+  const prepared = prepareSupportConfig(existing);
+  if (!prepared.changed) {
+    console.log("support/config already complete; preserving all configured values.");
     return;
   }
-  if (res.status !== 404) {
-    throw new Error(
-      `GET ${keyUrl} -> ${res.status}: ${await res.text()} (network/server error is NOT treated as "key absent").`,
-    );
-  }
-  // 404 → seed.
+  // The pure helper preserves current values and fills a missing identity once.
   const putRes = await telnyxFetch(keyUrl, {
     method: "PUT",
-    body: SEED_CONFIG_VALUE,
+    body: JSON.stringify(prepared.value),
   });
   if (!putRes.ok) {
     throw new Error(
-      `PUT ${keyUrl} -> ${putRes.status}: ${await putRes.text()}`,
+      `PUT ${keyUrl} -> ${putRes.status}: configuration update failed.`,
     );
   }
-  console.log(`support/config seeded with ${SEED_CONFIG_VALUE}.`);
+  console.log("support/config initialized missing fields; existing values preserved.");
 }
 
 // ---------------------------------------------------------------------------
@@ -831,7 +835,7 @@ async function main(): Promise<void> {
   // 4. Poll provisioning before any write.
   await pollKvProvisioning(kvId);
 
-  // 5. Seed support/config only if absent.
+  // 5. Fill only missing support/config fields, preserving the web demo identity.
   await seedSupportConfig(kvId);
 
   // 6. Admin secret (hybrid, .env priority).

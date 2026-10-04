@@ -1,7 +1,7 @@
 // Common HTTP callback boundaries: authentication before JSON parsing,
 // controlled errors, and one sanitized completion event for every request.
 
-import { DEFAULT_INIT_DYNAMIC_VARIABLES } from "../contracts";
+import { DEFAULT_INIT_DYNAMIC_VARIABLES, isSupportChannel, type SupportIdentityRequest } from "../contracts";
 import { errorCode, logEvent, OUTCOME, type Stage, type Outcome } from "../logging";
 import { readRawBody, verifyTelnyxSignature } from "../security";
 
@@ -43,6 +43,15 @@ export function runtimeSecrets(): RuntimeSecrets {
 // Narrow an untrusted JSON value without assertions about its properties.
 export function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// Parse our flat preset/admin identity fields. Web caller values are ignored;
+// no request may supply the backend's web demo configuration label.
+export function requestIdentity(body: Record<string, unknown>): SupportIdentityRequest {
+  if (!isSupportChannel(body.conversation_channel)) throw new HttpError(400, "unsupported_channel");
+  return body.conversation_channel === "web_call"
+    ? { conversation_channel: "web_call" }
+    : { conversation_channel: "phone_call", caller_phone: typeof body.caller_phone === "string" ? body.caller_phone : "" };
 }
 
 // Parse only once, reject arrays/primitives, and keep malformed JSON out of logs.

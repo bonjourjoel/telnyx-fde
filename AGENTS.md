@@ -708,7 +708,7 @@ Idea: a Telnyx developer support agent
 <plan>
 
 ARCHITECTURE AND DEVELOPMENT PLAN
-Telnyx developer support phone assistant
+Telnyx developer support voice assistant (phone and Portal tests)
 =======================================
 
 1. # ARCHITECTURE DECISIONS
@@ -718,6 +718,8 @@ The project includes:
 - A Telnyx voice assistant with a Conversation Workflow.
 - A single TypeScript Edge Function.
 - One Actor per caller, with persistent ticket storage.
+- One additional, explicitly configured demo identity for web_call Portal tests.
+  Its tickets use the same CallerTickets class and persist between smoke tests.
 - A KV namespace for configuration.
 - A custom MCP server served by the same Edge Function.
 - A Telnyx number for calling the assistant.
@@ -727,7 +729,11 @@ The Telnyx assistant conducts the conversation.
 
 The Function executes HTTP operations and serves the MCP.
 The Actor stores tickets and protects concurrent modifications.
-KV stores the technician_available flag.
+KV stores the technician_available flag and stable web_demo_identity.
+
+Accept phone_call and web_call. A phone call uses the caller's normalized number.
+A web_call uses only the demo identity configured by the backend in KV.
+Never derive a web identity from a fake phone number or a model-selected value.
 
 The FAQ is a small catalogue defined in the project.
 It provides three MCP tools:
@@ -800,6 +806,11 @@ Programmable phone entry point:
 - It does not conduct any conversation.
 - Once started, the Conversation Workflow takes control.
 
+Portal voice tests use web_call and reach the same assistant callbacks without
+the project's phone number entry point. Use them for routine conversational,
+FAQ, and ticket smoke tests. Real phone access and transfer validation remain
+part of the challenge's final verification.
+
 3. # CONVERSATION FLOW
 
 Legend:
@@ -813,12 +824,14 @@ Telnyx calls POST /init.
 
 The Function:
 
-1. Retrieves the caller's phone number from the native context.
-2. Calculates the stable identifier for their Actor.
+1. Reads the native conversation channel and backend KV configuration.
+2. Resolves the phone caller or configured web demo identity to a stable Actor.
 3. Reads their open or recent tickets.
-4. Reads technician_available from KV.
+4. Uses technician_available from the same KV configuration.
 5. Prepares the variables and greeting text.
-6. Returns {"dynamic_variables": {...}}.
+6. Derives operation_id from call_control_id for phone_call, or the documented
+   initialization event data.id for web_call, and returns dynamic_variables.
+   Missing data.id disables web creation; no random id is substituted.
 
 The initialization webhook is configured on the assistant.
 It is not a Conversation Workflow node.
@@ -1015,7 +1028,8 @@ Initialization and context, written by the backend:
 - tickets_json: string containing a JSON array
 - technician_available: boolean
 - greeting_text: string
-- operation_id: opaque string for this ticket creation
+- operation_id: opaque string for this ticket creation; derived from stable
+  phone call context or the web initialization event id, never a random fallback
 
 Variables written by Update Dynamic Variables:
 
@@ -1090,15 +1104,26 @@ It does not delete other tickets from storage.
 
 ## 4.4. Identity and concurrency
 
-The same normalized phone number must resolve to the same Actor.
+Supported channels: phone_call and web_call. Initial reads, ticket creation,
+and fixtures use one shared backend identity resolver.
+
+For phone_call, the same normalized phone number resolves to the same Actor.
+Preserve the existing phone HMAC scheme so deployed caller records stay reachable.
+
+For web_call, the identity is web_demo_identity in support/config KV.
+Use a domain-separated HMAC of this configured label with the stable HMAC secret.
+All Portal smoke tests and web fixtures use that same demo Actor. Ignore caller
+targets or demo identity labels supplied in web requests. Missing/invalid demo
+configuration disables per-entity web operations; never use an anonymous default.
 
 Actor key:
 
-- HMAC of the normalized number using a stable secret.
+- Phone: existing HMAC of the normalized number using a stable secret.
+- Web demo: HMAC of a separate web identity namespace and the configured label.
 - The raw number is neither the Actor key nor a log field.
 
-The initial read and ticket creation use exactly the same
-function to calculate this key.
+Initialization, creation, and fixtures use exactly the same resolver for the
+selected channel. The model cannot choose or modify the identity configuration.
 
 The Actor's createTicket method:
 
@@ -1121,11 +1146,23 @@ No custom lock is needed.
 
 operation_id prevents a repeated webhook from creating two tickets.
 
-A call without a usable phone identity can use the FAQ.
+For phone_call, retain the HMAC derived from caller identity and call_control_id.
+For web_call, derive a separate operation HMAC from demo Actor identity and the
+documented data.id of assistant.initialization. It identifies an initialization
+event, not a guaranteed native web session. Replays of the same event use the
+same operation_id; a distinct event yields a distinct operation on the same Actor.
+If data.id is absent or unusable, return can_create_ticket=false and an empty
+operation_id, while retaining ticket follow-up if the reads succeeded.
+Confirm the real Portal payload and event behavior during a later smoke test.
+Do not invent conversation_id/session_id fields or borrow WebSocket-only fields.
+
+A phone call without a usable phone identity can use the FAQ.
 It must not share an "anonymous" Actor with all other such callers.
 
 The HMAC secret remains stable across deployments.
 Changing it would change the keys used to retrieve callers' records.
+web_demo_identity also remains stable across deployments. Changing it explicitly
+selects another demo Actor; ordinary deployment must not replace it.
 
 ## 4.5. FAQ and MCP tools
 
@@ -1421,7 +1458,8 @@ Tasks:
 4. Wait until provisioning is complete.
 5. Declare the SUPPORT_CONFIG binding in telnyx.toml.
 6. Create the support/config key:
-   {"technician_available": false}
+   {"technician_available": false, "web_demo_identity": "portal-demo"}
+   This is an explicit backend demo label, not a phone number or model variable.
 
 7. Create the secrets:
    - Stable HMAC key for callers.
@@ -1436,7 +1474,9 @@ Retrieve the Telnyx public key using GET /v2/public_key.
 The returned field is data.public.
 
 The script does not overwrite the flag with false on every deployment.
-It initializes this configuration only if it is absent.
+It initializes only missing configuration fields, including web_demo_identity
+when upgrading a legacy configuration. Preserve existing flag, identity, and
+unrelated fields. An invalid existing identity is an error, not a reason to reset.
 
 The HMAC key is not regenerated on every deployment.
 
@@ -1446,6 +1486,7 @@ Validation:
 - The flag is false.
 - Required secrets are present.
 - A subsequent deployment preserves the configuration.
+- Two configuration preparations/deployments preserve the same web demo identity.
 
 Documentation:
 
@@ -1525,13 +1566,18 @@ Tasks:
 
 2. POST /init:
    - Verify the signature.
-   - Extract the caller's number from the Telnyx payload.
-   - Calculate the Actor key.
+   - Accept the documented phone_call and web_call channels.
+   - Read backend KV configuration.
+   - Resolve phone identity from the native caller number, or web identity from
+     web_demo_identity in KV. Never let the model choose the demo identity.
+   - Calculate the Actor key with the shared resolver.
    - Read tickets.
    - Read the KV flag.
    - Prepare a selection of at most three tickets.
    - Produce the complete greeting.
-   - Produce operation_id from the stable call context.
+   - Phone: produce operation_id from stable call_control_id context.
+   - Web: derive operation_id from the initialization event data.id.
+     If data.id is missing, disable creation rather than generate a random id.
    - Return {"dynamic_variables": {...}}.
 
 3. Provide two business greetings:
@@ -1546,7 +1592,9 @@ Tasks:
 5. POST /tickets/create:
    - Verify the signature.
    - Validate the fields.
-   - Calculate the same Actor key.
+   - Read the preset conversation_channel and caller_phone fields.
+   - Resolve the same Actor by channel; for web_call read backend KV identity
+     and ignore caller_phone or any request-selected demo label.
    - Call createTicket.
    - Return HTTP 200 with:
      {"ticket_id": "...", "ticket_reference": "..."}
@@ -1556,9 +1604,13 @@ Tasks:
 
 7. POST /admin/seed:
    - Verify the administration secret.
+   - Accept an explicit conversation_channel: phone_call or web_call.
+   - Use the shared resolver, so web fixtures and Portal tests share an Actor.
    - Insert fixtures without overwriting existing tickets.
 
 8. Create seed-demo.ts.
+   The default example targets web_call and needs no phone number.
+   For phone_call fixtures, configure caller_phone privately in the ignored file.
    The test number stays in local configuration excluded from
    version control.
 
@@ -1568,6 +1620,10 @@ Validation:
 - Fixtures can be added once.
 - Operations produce sanitized JSON logs.
 - /health continues to work independently of these resources.
+- Web initialization, creation, and fixtures address the same configured Actor.
+- Missing web data.id disables creation but does not prevent successful reads.
+- A repeated web event/creation is idempotent; new events get separate operations.
+- Signed phone and web callbacks remain mandatory; unsupported channels fail.
 
 Documentation:
 
@@ -1582,6 +1638,15 @@ Purpose: connecting callbacks to the Function and verifying signatures.
 Title: Actor Storage
 URL: https://developers.telnyx.com/docs/edge-compute/stateful-actors/api-reference/storage
 Purpose: persistent reads and creation.
+
+Title: Conversation Keying
+URL: https://developers.telnyx.com/docs/inference/ai-assistants/conversation-keying
+Purpose: distinguish Portal web_call from phone_call and websocket_call.
+
+Title: Webhook Fundamentals
+URL: https://developers.telnyx.com/docs/development/api-fundamentals/webhooks/receiving-webhooks
+Purpose: use the documented initialization data.id for event deduplication,
+without claiming it is a native web session id.
 
 ## STEP 7. IMPLEMENT AND VERIFY MCP
 
@@ -1686,10 +1751,14 @@ Business parameters:
 
 preset_body_fields:
 
+- conversation_channel = {{telnyx_conversation_channel}}
 - caller_phone = {{telnyx_end_user_target}}
 - operation_id = {{operation_id}}
 
 These values come from configuration, not the model's choices.
+For phone_call, caller_phone resolves the real caller. For web_call, the backend
+ignores this field and uses web_demo_identity from KV. Never expose the backend
+demo label as a model-writable variable or business tool argument.
 
 store_fields_as_variables:
 
@@ -1871,7 +1940,9 @@ Personalize the greeting and read an existing ticket.
 
 Tasks:
 
-1. Load fixtures for the test number.
+1. Load web_call fixtures for the backend demo identity to test from the Portal.
+   Load phone_call fixtures separately for the privately configured test number
+   when validating the real phone path. These identities remain independent.
 2. Add ORIENTATION and TICKET_STATUS.
 3. ORIENTATION:
    - If init_ok and tickets_count > 0, present the tickets.
@@ -2013,6 +2084,8 @@ Tasks:
 6. Successful exit:
    - Compare telnyx_last_tool_status_code with the string "200"
      for this phone channel.
+   - Verify the status value/type on the actual Portal voice smoke test too;
+     do not infer behavior from web chat or the separate WebSocket channel.
    - Also check that the expected result is present.
    - Move to TICKET_CREATED.
 
@@ -2145,6 +2218,7 @@ Rules:
 - Do not delete KV or Actors.
 - Do not load fixtures automatically.
 - Do not reset technician_available.
+- Initialize only a missing web_demo_identity; preserve its existing value.
 - Do not regenerate the HMAC key.
 
 - Send the workflow as a complete graph.
@@ -2211,6 +2285,14 @@ Test the following scenarios, one at a time:
 17. Caller identity missing or unusable.
 18. Sequential repetition of the same operation_id.
 19. Redeployment without ticket loss.
+20. Portal web_call: fixtures, follow-up, FAQ, confirmed creation, and retrieval
+    on a new smoke test, using the same backend-configured demo Actor.
+21. Web event replay: same data.id keeps operation_id; a distinct data.id changes
+    the operation while preserving the demo Actor.
+22. Missing web data.id: ticket follow-up remains available after successful
+    reads, but can_create_ticket=false and no random operation is generated.
+23. Missing/invalid web_demo_identity and unsupported channels fail safely.
+24. Redeployment preserves web demo configuration and previously created tickets.
 
 For each scenario:
 
@@ -2224,6 +2306,8 @@ Targeted code checks:
 - Field validation.
 - Stable Actor key calculation.
 - Reuse of operation_id.
+- Shared phone/web identity resolution, with existing phone keys unchanged.
+- Preservation of web_demo_identity and derivation from the web event data.id.
 - Unknown FAQ identifier.
 - Validity of the graph and its references.
 
@@ -2344,6 +2428,9 @@ Tasks:
 Demonstration, 8 to 10 minutes:
 
 - Show a personalized call with a ticket.
+- Use the Portal voice test for routine FAQ and ticket smoke checks, with web
+  fixtures and the stable demo identity. Retain a real phone call to prove the
+  submitted number and routing, and real transfer checks where required.
 - Show an FAQ question and its MCP tools.
 - Show a long answer.
 - Show a question outside the FAQ and ticket creation.
