@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { checkMcpEndpoint, localMcpFetch } from "./check-mcp";
 import { routeRequest } from "../src/index";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 // Raw protocol requests cover HTTP boundaries independently of client helpers.
 function protocolRequest(body: string, headers: Record<string, string> = {}, method = "POST"): Request {
@@ -50,6 +51,19 @@ test("stateless MCP protocol and public catalogue", async (t) => {
         }
       });
     }
+
+    await t.test("Telnyx MCP conversation metadata stays outside strict tool arguments", async () => {
+      const client = new Client({ name: "offline-telnyx-meta", version: "1.0" });
+      try {
+        await client.connect(new StreamableHTTPClientTransport(new URL("https://localhost/mcp"), { fetch: localMcpFetch }));
+        const result = await client.callTool({ name: "list_topics", arguments: {},
+          _meta: { telnyx_conversation_id: "synthetic-private-conversation-marker" } });
+        assert.ok(!result.isError);
+        const content = result.structuredContent;
+        assert.ok(content && typeof content === "object" && "topics" in content && Array.isArray(content.topics));
+        assert.ok(!lines.join("\n").includes("synthetic-private-conversation-marker"));
+      } finally { await client.close(); }
+    });
 
     await t.test("Host and Origin validation reject unlisted values", async () => {
       const cases: Record<string, string>[] = [{ Host: "unlisted.invalid" }, { Origin: "https://unlisted.invalid" }];

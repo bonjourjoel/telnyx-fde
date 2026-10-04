@@ -1,5 +1,5 @@
-// Ticket follow-up workflow and validation of the graph, tool references and
-// deterministic context guards. FAQ/intake/transfer branches are later steps.
+// Ticket follow-up and MCP FAQ workflow, with validated graph/tool references
+// and deterministic context guards. Intake and transfer remain later steps.
 
 import * as z from "zod/v4";
 import {
@@ -7,10 +7,9 @@ import {
   WRITABLE_DYNAMIC_VARIABLE_KEYS,
   CREATED_TICKET_VARIABLE_KEYS,
 } from "../src/contracts";
+import { FAQ_SHORT_PROMPT, RESOLUTION_MESSAGE, FAQ_ERROR_MESSAGE } from "./faq-prompts";
 
 // Support wording stays separate from graph construction for easy review.
-export const CONVERSATION_PROMPT =
-  "Have a short conversation about the user's new question in English. Ask one question at a time. FAQ answers, new ticket creation, and technician transfers are not enabled in this test yet. If requested, explain this briefly. Do not invent ticket statuses. If the caller wants to return to ticket follow-up, use the workflow transition to ORIENTATION. When the user wants to finish, use the workflow's goodbye transition.";
 export const END_CONVERSATION_CONDITION =
   "The user has clearly asked to end the conversation or said that they need no further help.";
 export const GOODBYE_MESSAGE =
@@ -42,7 +41,7 @@ Wait for a successful result.
 Let the TICKET_STATUS Speak node announce it; do not read it yourself.
 
 - ROUTING:
-New question: use the CONVERSATION transition.
+New question: use the FAQ_SHORT transition.
 Cancellation or request to finish: use the GOODBYE transition.
 Update failure or missing status_text: use the ticket-status error transition.
 
@@ -63,7 +62,7 @@ function withGoodbye(message: string): string {
 }
 
 // Native shared references are required before building this workflow.
-export interface FollowUpTools {
+export interface SupportWorkflowTools {
   hangup: string;
   set_support_variables: string;
 }
@@ -90,7 +89,7 @@ const NodeSchema = z.discriminatedUnion("type", [
     instructions: z.string().min(1),
     instructions_mode: z.literal("append"),
     shared_tool_ids: z.array(z.string().min(1)),
-    tools_mode: z.literal("replace"),
+    tools_mode: z.enum(["replace", "append"]),
   }),
   z.strictObject({
     ...NodeFields,
@@ -139,7 +138,7 @@ const FlowSchema = z.strictObject({
 });
 export type ConversationFlow = z.infer<typeof FlowSchema>;
 
-// Only declared support variables may drive the local step 11 comparisons.
+// Only declared support variables may drive workflow comparisons.
 const KNOWN_VARIABLES = new Set<string>([
   ...INIT_DYNAMIC_VARIABLE_KEYS,
   ...WRITABLE_DYNAMIC_VARIABLE_KEYS,
@@ -233,9 +232,9 @@ function comparison(
   };
 }
 
-// Stable ids keep greeting/goodbye/hangup and the new-question placeholder.
-// Context guards precede the status guard, preventing false empty-list claims.
-export function buildFollowUpWorkflow(tools: FollowUpTools): ConversationFlow {
+// Keep ticket identities and closing paths; replace the new-question placeholder
+// with FAQ title lookup, a closing Speak and safe fallbacks.
+export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationFlow {
   if (
     !tools.hangup.trim() ||
     !tools.set_support_variables.trim() ||
@@ -273,13 +272,19 @@ export function buildFollowUpWorkflow(tools: FollowUpTools): ConversationFlow {
         },
         {
           type: "prompt",
-          id: "conversation",
-          name: "CONVERSATION",
-          instructions: CONVERSATION_PROMPT,
+          id: "faq_short",
+          name: "FAQ_SHORT",
+          instructions: FAQ_SHORT_PROMPT,
           instructions_mode: "append",
           shared_tool_ids: [],
-          tools_mode: "replace",
+          tools_mode: "append",
           position: { x: 600, y: 180 },
+        },
+        {
+          type: "speak", id: "resolution", name: "RESOLUTION", message: withGoodbye(RESOLUTION_MESSAGE), position: { x: 900, y: 360 },
+        },
+        {
+          type: "speak", id: "faq_error", name: "FAQ_ERROR", message: withGoodbye(FAQ_ERROR_MESSAGE), position: { x: 900, y: 540 },
         },
         {
           type: "speak",
@@ -326,7 +331,7 @@ export function buildFollowUpWorkflow(tools: FollowUpTools): ConversationFlow {
         {
           id: "orientation_no_tickets",
           start_node_id: "orientation",
-          target: { type: "node", node_id: "conversation" },
+          target: { type: "node", node_id: "faq_short" },
           condition: comparison("tickets_count", 0),
         },
         {
@@ -336,9 +341,9 @@ export function buildFollowUpWorkflow(tools: FollowUpTools): ConversationFlow {
           condition: comparison("selected_ticket_status_text", "", "!="),
         },
         {
-          id: "orientation_to_conversation",
+          id: "orientation_to_faq_short",
           start_node_id: "orientation",
-          target: { type: "node", node_id: "conversation" },
+          target: { type: "node", node_id: "faq_short" },
           condition: {
             type: "llm",
             prompt:
@@ -362,9 +367,9 @@ export function buildFollowUpWorkflow(tools: FollowUpTools): ConversationFlow {
           },
         },
         {
-          id: "context_to_conversation",
+          id: "context_to_faq_short",
           start_node_id: "context_unavailable",
-          target: { type: "node", node_id: "conversation" },
+          target: { type: "node", node_id: "faq_short" },
           condition: { type: "default" },
         },
         {
@@ -380,21 +385,21 @@ export function buildFollowUpWorkflow(tools: FollowUpTools): ConversationFlow {
           condition: { type: "default" },
         },
         {
-          id: "conversation_to_orientation",
-          start_node_id: "conversation",
-          target: { type: "node", node_id: "orientation" },
-          condition: {
-            type: "llm",
-            prompt:
-              "The caller wants to return to following up on an existing ticket.",
-          },
+          id: "faq_short_to_goodbye",
+          start_node_id: "faq_short",
+          target: { type: "node", node_id: "goodbye" },
+          condition: { type: "llm", prompt: "The documentation lookup succeeded and the assistant has announced the exact page title, or the caller cancels or asks to end the conversation. No further explanation is offered." },
         },
         {
-          id: "conversation_to_goodbye",
-          start_node_id: "conversation",
-          target: { type: "node", node_id: "goodbye" },
-          condition: { type: "llm", prompt: END_CONVERSATION_CONDITION },
+          id: "faq_short_not_covered", start_node_id: "faq_short", target: { type: "node", node_id: "resolution" },
+          condition: { type: "llm", prompt: "list_topics completed successfully, but no returned coverage description covers the caller's question. A failed or unavailable tool is not evidence of absent coverage." },
         },
+        {
+          id: "faq_short_failed", start_node_id: "faq_short", target: { type: "node", node_id: "faq_error" },
+          condition: { type: "llm", prompt: "A required MCP tool failed or was unavailable, or returned an incomplete result, so the short documentation lookup could not be completed." },
+        },
+        { id: "resolution_to_hangup", start_node_id: "resolution", target: { type: "node", node_id: "hangup" }, condition: { type: "default" } },
+        { id: "faq_error_to_hangup", start_node_id: "faq_error", target: { type: "node", node_id: "hangup" }, condition: { type: "default" } },
         {
           id: "goodbye_to_hangup",
           start_node_id: "goodbye",

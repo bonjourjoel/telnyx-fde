@@ -140,8 +140,6 @@ export type InitDynamicVariableKey = (typeof INIT_DYNAMIC_VARIABLE_KEYS)[number]
 // identity, flags, and creation identifiers must never be writable from here.
 export const WRITABLE_DYNAMIC_VARIABLE_KEYS = [
   "selected_ticket_status_text",
-  "faq_topic_id",
-  "faq_long_text",
   "ticket_subject",
   "ticket_description",
 ] as const;

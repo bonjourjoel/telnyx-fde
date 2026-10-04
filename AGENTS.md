@@ -877,23 +877,12 @@ v
 |
 +-- Topic found
 | Gives the documentation page title.
-| Asks whether the caller wants the long explanation.
-| |
-| +-- No -> GOODBYE -> HANGUP
-| |
-| +-- Yes
 | |
 | v
-| [P] FAQ_LONG
-| MCP: read_long_answer
-| Stores the returned text.
+| [S] GOODBYE
 | |
 | v
-| [S] FAQ_LONG_MESSAGE
-| Says {{faq_long_text}}.
-| |
-| v
-| GOODBYE -> HANGUP
+| default -> [T] HANGUP
 |
 +-- Topic not covered, or MCP unavailable
 |
@@ -1049,8 +1038,6 @@ Initialization and context, written by the backend:
 Variables written by Update Dynamic Variables:
 
 - selected_ticket_status_text: string
-- faq_topic_id: string
-- faq_long_text: string
 - ticket_subject: string
 - ticket_description: string
 
@@ -1813,7 +1800,7 @@ without recreating the connection established by the validation check.
 
 A. SET_SUPPORT_VARIABLES
 Type update_dynamic_variables.
-Allow only the five writable variables from section 4.2.
+Allow only the three writable variables from section 4.2.
 
 B. CREATE_TICKET
 Type webhook.
@@ -2182,7 +2169,7 @@ Implementation for step 11:
   node canvas order is immaterial. Never treat guard reordering as equivalent.
 - Attach the existing shared updater and hangup ids. Only ORIENTATION exposes
   the updater; only selected_ticket_status_text should be written in this step.
-  Check the exact five-variable library allowlist on GET and never resend merged
+  Check the exact three-variable library allowlist on GET and never resend merged
   shared definitions inline. tools_mode stays replace; instructions_mode append.
 - scripts/reset-actor.ts reads the Function URL from ignored deployment state
   and the existing admin secret from the environment. It runs no ship or seed.
@@ -2227,7 +2214,8 @@ Purpose: variable-based routing, Speak nodes, and LLM transitions.
 ## STEP 12. ADD THE MCP FAQ BRANCH
 
 Objective:
-Perform the three MCP reads during a real conversation.
+Look up a documentation title during a real conversation, then close the call.
+The public MCP retains all three tools; the voice flow uses only the first two.
 
 Tasks:
 
@@ -2237,24 +2225,23 @@ Tasks:
    - Compare the question with the coverage descriptions.
    - Do not call a search engine.
    - If a topic matches, call read_short_answer.
-   - Store faq_topic_id using SET_SUPPORT_VARIABLES.
    - Say the page title.
-   - Ask whether the caller wants the long explanation.
+   - Do not offer or read a long explanation.
 
-2. Negative response:
-   - GOODBYE, then HANGUP.
+2. After announcing the title:
+   - Call transition__faq_short_to_goodbye without asking another question.
+   - GOODBYE is a Speak with one default edge to the HANGUP Tool node.
 
-3. Positive response:
-   - Move to FAQ_LONG.
-   - Call read_long_answer with the same faq_topic_id.
-   - Copy the returned text into faq_long_text.
-   - Move to FAQ_LONG_MESSAGE.
-   - Speak {{faq_long_text}}.
-   - GOODBYE, then HANGUP.
+3. Joel approved removing the voice long-answer branch:
+   - No FAQ_LONG, long-answer Speak or writable FAQ variables.
+   - Keep read_long_answer in the public MCP, catalogue and exact allowlists.
+   - Verify all three tools with the official MCP client; do not claim the voice
+     conversation invokes the third tool in this simplified flow.
 
-4. Topic not covered or MCP error:
-   - Move to RESOLUTION.
+4. Topic not covered:
+   - Move to RESOLUTION (temporary unavailable-service message until steps 13/14).
    - Do not improvise an explanation of the documentation.
+   - MCP errors use the distinct FAQ_ERROR branch.
 
 5. Configure the MCP allowlist at server/assistant level.
 
@@ -2264,12 +2251,41 @@ Tasks:
 7. Check that tools_mode does not unintentionally remove
    MCP from the FAQ nodes.
 
+Implementation for step 12:
+
+- config/faq-prompts.ts contains Joel-approved structured prompts and fallback
+  wording. config/workflow.ts builds the complete ticket/FAQ graph. New questions
+  and successful empty ticket reads reach FAQ_SHORT; ticket follow-up is preserved.
+- FAQ_SHORT calls list_topics and read_short_answer with the chosen tool-result
+  topic id. Announce only the exact title, never the URL or model knowledge, then
+  call transition__faq_short_to_goodbye. No explanation offer or answer is read.
+  Joel's softened clarification instruction is retained. FAQ does not use the
+  updater; remove the unused faq_topic_id/faq_long_text defaults and writable keys.
+- The FAQ Prompt uses tools_mode=append with no added shared tools, preserving
+  all three registered MCP tools. Only two are used by this voice flow; the third
+  remains publicly callable with the official MCP client. Assistant tool_ids
+  attaches only SET_SUPPORT_VARIABLES, which now has three writable keys for
+  ticket follow-up/intake. HANGUP is unavailable to every Prompt and stays scoped
+  to its standalone Tool node after a closing Speak. No new tool is created.
+  Generalize assistant GET verification accordingly and never invent shared ids
+  for discovered MCP tools. Keep the server/assistant three-tool allowlists exact.
+- RESOLUTION is a temporary Speak explaining absent coverage and the unavailable
+  future ticket/technician services. Tool failure has a separate FAQ_ERROR Speak.
+  Both include goodbye and go directly to hangup. Do not implement steps 13/14 yet.
+- deploy.ts upserts the whole desired assistant graph with existing ids. Backend
+  business operations, identity resolution, KV/HMAC and Actor records are unchanged.
+- Local tests cover route guards, prompt tool scopes, allowlist drift and reuse.
+  The actual MCP SDK also accepts Telnyx's documented telnyx_conversation_id in
+  request _meta without widening tool argument schemas or logging the value.
+  docs/test-faq.md gives the Portal smoke test. Local checks do not prove hosted
+  model tool selection or voice delivery; Joel deploys and performs the live test.
+
 Validation:
 
 - list_topics is called.
 - The short answer is delivered.
-- Declining the long answer ends the call correctly.
-- Requesting the long answer triggers read_long_answer.
+- The title is followed by goodbye and hangup without another caller response.
+- No long explanation is offered or read; the public MCP still exposes three tools.
 - A question outside the catalogue reaches RESOLUTION.
 
 Documentation:
@@ -2513,7 +2529,7 @@ Test the following scenarios, one at a time:
 2. Several tickets and selection of the correct one.
 3. Ambiguous selection requiring clarification.
 4. FAQ with only a short answer.
-5. FAQ with a long answer.
+5. FAQ automatic goodbye/hangup without offering a long answer.
 6. Question not covered by the FAQ.
 7. technician_available = false.
 8. technician_available = true and successful transfer.
@@ -2678,7 +2694,7 @@ Demonstration, 8 to 10 minutes:
   fixtures and the stable demo identity. Retain a real phone call to prove the
   submitted number and routing, and real transfer checks where required.
 - Show an FAQ question and its MCP tools.
-- Show a long answer.
+- Show the third MCP tool through the official client; the voice FAQ is title-only.
 - Show a question outside the FAQ and ticket creation.
 - Show the ticket retrieved on a new call.
 - Show the flag and human branch.

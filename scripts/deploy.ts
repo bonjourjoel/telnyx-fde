@@ -5,7 +5,7 @@
 // run repeatedly: it reuses identifiers stored in deployment-state.json and
 // never resets already-created state.
 //
-// Backend, MCP/shared tools, phone routing and ticket follow-up through step 11:
+// Backend, MCP/shared tools, phone routing, ticket follow-up and FAQ through step 12:
 //   Preflight: typecheck, then the shared full local test suite, before .env.
 //   Runtime credential: validate the org SDK binding; renew only confirmed
 //   invalid/expired tokens on that same resource before storage/secrets/ship.
@@ -39,7 +39,7 @@
 //      every dependency check passes (KV read + three secrets present).
 //  15. Upsert the existing HTTP MCP connection and four shared tools, checkpoint
 //      every id immediately, and verify their definitions and uniqueness.
-//  16. Upsert the assistant and complete follow-up workflow using existing ids.
+//  16. Upsert the complete support workflow with existing shared/MCP references.
 //  17. Store TeXML, reuse the existing profile, upsert phone routing, assign the
 //      purchased number and read back references without placing a call.
 //  18. Save final deployment metadata and print ids/URLs only.
@@ -742,7 +742,7 @@ async function probeCheckConfig(funcUrl: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  console.log("=== telnyx-fde deploy (through step 11) ===");
+  console.log("=== telnyx-fde deploy (through step 12) ===");
 
   // Fail locally before loading credentials or provisioning any account resource.
   await checkTypeScript();
@@ -854,7 +854,7 @@ async function main(): Promise<void> {
   const sharedTools = await syncSharedTools(getRestApi(), stateStore, tools);
   for (const tool of sharedTools) console.log(JSON.stringify({ operation: "shared_tool_upsert", ...tool }));
 
-  // 16. Follow-up workflow references existing tools; Portal identity is kept.
+  // 16. Ticket/FAQ workflow references existing tools; Portal identity is kept.
   const hangupId = sharedTools.find((tool) => tool.tool === "HANGUP")?.id;
   const updaterId = sharedTools.find((tool) => tool.tool === "SET_SUPPORT_VARIABLES")?.id;
   if (!hangupId) throw new TelnyxApiError("missing_hangup_tool_id");
@@ -885,7 +885,7 @@ async function main(): Promise<void> {
   console.log(`MCP id       : ${state.mcp_server_id}.`);
   console.log(`Shared tools : ${sharedTools.length} verified (identifiers saved).`);
   console.log(`Assistant id : ${state.assistant_id}.`);
-  console.log("Workflow     : GREETING -> ORIENTATION -> TICKET_STATUS / CONVERSATION -> GOODBYE -> HANGUP.");
+  console.log("Workflow     : GREETING -> ORIENTATION -> TICKET_STATUS / FAQ_SHORT -> GOODBYE -> HANGUP.");
   console.log(`Voice entry  : ${new URL("/voice-entry", funcUrl).href}`);
   console.log(`Phone id     : ${state.phone_number_id} (number in config/telephony.ts).`);
   console.log(`TeXML app id : ${state.texml_application_id}.`);

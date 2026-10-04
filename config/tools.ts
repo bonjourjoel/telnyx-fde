@@ -25,8 +25,6 @@ export interface SharedToolDefinition {
 // Descriptions guide collection while retaining the single contracts allowlist.
 const VARIABLE_DESCRIPTIONS: Record<WritableDynamicVariableKey, string> = {
   selected_ticket_status_text: "Copy the selected ticket's exact backend status_text, including its reference and status.",
-  faq_topic_id: "Store the catalogue topic id returned by list_topics.",
-  faq_long_text: "Copy the exact long answer returned by the MCP reading tool.",
   ticket_subject: "Collect a concise ticket subject without credentials.",
   ticket_description: "Collect a concise support description without credentials.",
 };

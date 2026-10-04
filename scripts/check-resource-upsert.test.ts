@@ -145,7 +145,7 @@ test("two resource synchronizations retain one MCP and four tools without duplic
   assert.ok(!JSON.stringify(store.state).includes(TECHNICIAN_PHONE_NUMBER));
 });
 
-// Reproduce the observed response independently of the request builder. A saved
+// Reproduce the observed flat envelope with the current writable allowlist. A saved
 // id and pending checkpoint from the failed read-back must resume using GET only.
 test("observed flat tool definition resumes failed verification without POST or PATCH", async () => {
   const store = new Store();
@@ -158,8 +158,6 @@ test("observed flat tool definition resumes failed verification without POST or 
       name: "SET_SUPPORT_VARIABLES", description: "Update only the listed support conversation inputs.",
       updatable_variables: [
         { name: "selected_ticket_status_text", type: "string", description: "Copy the selected ticket's exact backend status_text, including its reference and status." },
-        { name: "faq_topic_id", type: "string", description: "Store the catalogue topic id returned by list_topics." },
-        { name: "faq_long_text", type: "string", description: "Copy the exact long answer returned by the MCP reading tool." },
         { name: "ticket_subject", type: "string", description: "Collect a concise ticket subject without credentials." },
         { name: "ticket_description", type: "string", description: "Collect a concise support description without credentials." },
       ],
@@ -292,6 +290,20 @@ test("reordered writable variables are reused and an extra variable is removed b
   const corrected = await upsertSharedTool(api, store, "SET_SUPPORT_VARIABLES", DEFINITIONS.SET_SUPPORT_VARIABLES);
   assert.equal(corrected.action, "updated");
   assert.equal(corrected.resource.id, first.resource.id);
+});
+
+// Retiring unused FAQ variables updates the existing library tool once, keeping
+// its identity and leaving subsequent reconciliations read-only.
+test("unused FAQ variables are removed without replacing the shared updater", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertSharedTool(api, store, "SET_SUPPORT_VARIABLES", DEFINITIONS.SET_SUPPORT_VARIABLES);
+  const definition = api.tools.get(first.resource.id)!.tool_definition as Record<string, unknown>;
+  (definition.updatable_variables as Record<string, unknown>[]).push(
+    { name: "faq_topic_id", type: "string" }, { name: "faq_long_text", type: "string" });
+  const updated = await upsertSharedTool(api, store, "SET_SUPPORT_VARIABLES", DEFINITIONS.SET_SUPPORT_VARIABLES);
+  assert.equal(updated.action, "updated"); assert.equal(updated.resource.id, first.resource.id);
+  assert.equal((await upsertSharedTool(api, store, "SET_SUPPORT_VARIABLES", DEFINITIONS.SET_SUPPORT_VARIABLES)).action, "reused");
+  assert.equal(api.tools.size, 1);
 });
 
 // Inaccessible ids are not absence; only a 404 plus a full scan can adopt a match.

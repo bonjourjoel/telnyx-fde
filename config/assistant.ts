@@ -1,8 +1,8 @@
-// Desired ticket follow-up assistant request, including safe context defaults.
+// Desired support assistant with ticket follow-up, MCP FAQ and safe defaults.
 // Deployment injects existing resource ids; no credentials or phone values here.
 
 import { DEFAULT_INIT_DYNAMIC_VARIABLES, WRITABLE_DYNAMIC_VARIABLE_KEYS, CREATED_TICKET_VARIABLE_KEYS } from "../src/contracts";
-import { buildFollowUpWorkflow, type FollowUpTools, type ConversationFlow } from "./workflow";
+import { buildSupportWorkflow, type SupportWorkflowTools, type ConversationFlow } from "./workflow";
 
 // Telnyx documents Kimi-K2.6 as voice-verified; deploy checks account availability.
 // Kokoro and Deepgram Flux use the Telnyx platform without customer provider keys.
@@ -37,8 +37,9 @@ function defaultVariables(): AssistantDefinition["dynamic_variables"] {
 }
 
 // Build JSON from the actual Function URL and already-verified resource ids.
-// Existing shared references attach the updater and hangup without duplication.
-export function buildAssistant(functionUrl: string, projectName: string, mcpId: string, tools: FollowUpTools): AssistantDefinition {
+// Only the updater is a model tool. All hangups use the org-level Tool node
+// after their closing Speak, including the title-only FAQ's farewell.
+export function buildAssistant(functionUrl: string, projectName: string, mcpId: string, tools: SupportWorkflowTools): AssistantDefinition {
   const base = new URL(functionUrl);
   if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash || base.pathname !== "/" ||
     !/^[a-zA-Z0-9_-]+$/.test(projectName) || !mcpId.trim()) {
@@ -50,7 +51,7 @@ export function buildAssistant(functionUrl: string, projectName: string, mcpId: 
     transcription: { ...ASSISTANT_TRANSCRIPTION },
     dynamic_variables_webhook_url: new URL("/init", base).href,
     dynamic_variables_webhook_timeout_ms: INIT_WEBHOOK_TIMEOUT_MS, dynamic_variables: defaultVariables(),
-    mcp_servers: [{ id: mcpId, allowed_tools: [...FAQ_TOOL_NAMES] }], tool_ids: [tools.hangup, tools.set_support_variables], tools: [],
-    conversation_flow: buildFollowUpWorkflow(tools),
+    mcp_servers: [{ id: mcpId, allowed_tools: [...FAQ_TOOL_NAMES] }], tool_ids: [tools.set_support_variables], tools: [],
+    conversation_flow: buildSupportWorkflow(tools),
   };
 }

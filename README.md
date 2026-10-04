@@ -29,7 +29,8 @@ A Telnyx Edge **StatefulActor** project, scaffolded with `telnyx-edge new-func -
 | `scripts/check-mcp.ts` / `scripts/check-mcp.test.ts` | Official client verification and sequential offline protocol checks. |
 | `config/telephony.ts` | Explicitly authorized phone constants for the assistant and technician. |
 | `config/tools.ts` | Desired definitions of the four shared native tools. |
-| `config/assistant.ts` / `config/workflow.ts` | Assistant settings and the ticket follow-up workflow with context guards. |
+| `config/assistant.ts` / `config/workflow.ts` | Assistant settings and ticket/FAQ workflow with context guards. |
+| `config/faq-prompts.ts` | Approved structured FAQ prompts and scripted fallback text. |
 | `scripts/check-assistant.test.ts` | Offline graph, model preflight, and assistant create/update/reuse checks. |
 | `scripts/run-tests.ts` | Single full local test routine used by npm run test and deployment. |
 | `scripts/lib/` | Shared safe REST client, atomic state, and resource upsert adapters. |
@@ -422,7 +423,7 @@ present browser origins are rejected because no browser MCP caller is configured
 
 The HTTP MCP connection was registered and verified by API during the step 8
 precheck; its id/type are saved in private deployment state. The workflow's FAQ
-branch remains step 12. Local protocol checks do not establish that integration.
+branch is added by step 12 below. Local protocol checks alone do not establish native voice integration.
 The SDK integration follows its official
 [web-standard serving guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/serving/web-standard.md)
 and [client testing guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/testing.md).
@@ -435,7 +436,7 @@ then synchronizes `SET_SUPPORT_VARIABLES`, `CREATE_TICKET`, `TRANSFER`, and
 Minimal assistant/workflow creation is added by step 9 below.
 
 Definitions come from `config/tools.ts`. The variable updater exposes only the
-five keys in `WRITABLE_DYNAMIC_VARIABLE_KEYS`. The synchronous creation webhook
+three keys in `WRITABLE_DYNAMIC_VARIABLE_KEYS`. The synchronous creation webhook
 has only subject and description as model arguments; channel, caller target, and
 operation id are preset. Response mappings use `name` and `value_path`. Transfer
 has one destination and a fixed caller ID. Joel explicitly requested both phone
@@ -607,10 +608,10 @@ The orientation prompt has only the variable updater. Deterministic expression
 edges prioritize initialization failure, then an empty ticket list, then a filled
 status variable. An initialization failure gets an explicit unavailable message;
 it is never presented as an empty caller history. Updater failure has an error
-branch. New questions use the existing conversation placeholder; FAQ, intake and
-transfer branches remain later work. Instruction mode stays append.
+branch. Step 12 replaces the new-question placeholder with FAQ lookup; intake and
+transfer remain later work. Instruction mode stays append.
 
-Assistant read-back verifies both shared native tools and the updater's exact
+Assistant read-back verifies the configured shared model tools and the updater's exact
 writable allowlist. It preserves expression-edge priority while tolerating canvas
 node reordering. Complete workflow updates reuse the existing assistant and tool
 ids. Deployment neither resets callers nor loads fixtures.
@@ -635,6 +636,37 @@ formatted status context, expression precedence, and idempotent assistant update
 It does not execute a hosted LLM. Native tool update and spoken ticket selection
 still require a Portal voice test after deployment. Physical inbound calls remain
 blocked by the account-level D61 restriction recorded in AGENTS.md.
+
+## Voice MCP FAQ (step 12)
+
+`config/faq-prompts.ts` contains the approved structured `FAQ_SHORT` instructions.
+Collect a question only if needed, call `list_topics`, match coverage and call
+`read_short_answer` with the chosen tool-result id. Announce the exact page title,
+never the URL, then call `transition__faq_short_to_goodbye`. The GOODBYE Speak
+has one default edge to the HANGUP Tool node. No caller confirmation is needed.
+
+Joel approved removing the long explanation offer and branch. The FAQ does not
+store conversation variables. The public MCP and both allowlists still expose
+all three tools, including `read_long_answer`, verified through the official
+client. The voice flow uses only `list_topics` and `read_short_answer`.
+
+FAQ_SHORT uses `tools_mode=append` with no added shared tools to retain MCP.
+Assistant `tool_ids` contains only the updater for ticket follow-up/intake.
+HANGUP is available only through the standalone Tool node, never as a native
+tool for any Prompt. Existing assistant, MCP, shared-tool and phone ids are reused.
+
+No catalogue match reaches the temporary `RESOLUTION` Speak. MCP failure reaches
+a distinct `FAQ_ERROR` Speak. Both include goodbye before hangup; unavailability
+is never declared as absent coverage. Ticket follow-up is preserved. Ticket
+creation and technician transfer remain steps 13/14.
+
+The local suite verifies ticket guard priority, title-only routing, closing
+Speak/default hangup paths, model tool scopes, allowlist repair and stable ids.
+It also exercises the real SDK with native Telnyx conversation metadata in `_meta`,
+outside strict business arguments. These checks do not run the hosted voice model.
+After deployment, follow [test-faq.md](docs/test-faq.md) for Portal validation of
+the two voice tool calls, spoken title, goodbye and hangup. Deployment and this live
+FAQ smoke test remain to be run by Joel. No fixtures or Actor records are changed.
 
 ## KV failure diagnosis
 

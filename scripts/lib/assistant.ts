@@ -67,8 +67,8 @@ function configuredFlow(value: unknown, desired: ConversationFlow): boolean {
 }
 
 // GET merges shared tools into tools instead of necessarily returning tool_ids.
-// Verify the shared hangup/updater and its exact writable allowlist without
-// resending merged definitions. Node references are checked in configuredFlow.
+// Verify the sole model-visible updater and its exact writable allowlist without
+// resending merged definitions. HANGUP is scoped to its standalone Tool node.
 function configuredAssistant(resource: AssistantResource, desired: AssistantDefinition): boolean {
   const { tools: _inline, tool_ids, conversation_flow, ...fields } = desired;
   if (!matchesDesired(resource, fields) || !configuredFlow(resource.conversation_flow, conversation_flow)) return false;
@@ -78,9 +78,8 @@ function configuredAssistant(resource: AssistantResource, desired: AssistantDefi
   if (!Array.isArray(resource.tools) || resource.tools.length !== tool_ids.length) return false;
   const merged = resource.tools.map(record);
   if (merged.some(tool => tool?.shared !== true)) return false;
-  const hangups = merged.filter(tool => tool?.type === "hangup");
   const updaters = merged.filter(tool => tool?.type === "update_dynamic_variables");
-  if (hangups.length !== 1 || !record(hangups[0]?.hangup) || updaters.length !== 1) return false;
+  if (merged.length !== 1 || updaters.length !== 1) return false;
   const updater = record(updaters[0]?.update_dynamic_variables);
   if (updater?.name !== "SET_SUPPORT_VARIABLES" || !Array.isArray(updater.updatable_variables)) return false;
   return matchesDesired(updater.updatable_variables, WRITABLE_DYNAMIC_VARIABLE_KEYS.map(name => ({ name, type: "string" })), false, "updatable_variables");

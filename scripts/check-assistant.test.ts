@@ -5,7 +5,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildAssistant, ASSISTANT_MODEL, ASSISTANT_INSTRUCTIONS, INIT_WEBHOOK_TIMEOUT_MS } from "../config/assistant";
-import { buildFollowUpWorkflow, validateConversationFlow, CONVERSATION_PROMPT, ORIENTATION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION } from "../config/workflow";
+import { buildSupportWorkflow, validateConversationFlow, ORIENTATION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION } from "../config/workflow";
+import { FAQ_SHORT_PROMPT } from "../config/faq-prompts";
 import { DEFAULT_INIT_DYNAMIC_VARIABLES, WRITABLE_DYNAMIC_VARIABLE_KEYS, CREATED_TICKET_VARIABLE_KEYS } from "../src/contracts";
 import { assertAssistantModelAvailable, upsertAssistant } from "./lib/assistant";
 import { TelnyxApiError, type ApiMethod } from "./lib/telnyx-api";
@@ -44,8 +45,7 @@ class Registry implements ResourceApi {
     const body = structuredClone(value) as Record<string, unknown>;
     delete body.tool_ids;
     return { ...body, id, version_id: "version-example", created_at: "2026-10-04T00:00:00Z",
-      tools: [{ type: "hangup", hangup: { description: "End the support conversation after the final message." }, shared: true },
-        { type: "update_dynamic_variables", shared: true, update_dynamic_variables: { name: "SET_SUPPORT_VARIABLES",
+      tools: [{ type: "update_dynamic_variables", shared: true, update_dynamic_variables: { name: "SET_SUPPORT_VARIABLES",
           description: "Update only the listed support conversation inputs.", updatable_variables: WRITABLE_DYNAMIC_VARIABLE_KEYS.map(name => ({ name, type: "string" })) } }],
       external_llm: null, llm_api_key_ref: null,
       telephony_settings: { default_texml_app_id: "texml-auto-example" },
@@ -75,7 +75,7 @@ class Registry implements ResourceApi {
     const input = body as typeof DEFINITION;
     assert.ok(!("id" in input) && !("version_id" in input) && !("created_at" in input));
     assert.deepEqual(input.tools, []);
-    assert.deepEqual(input.tool_ids, ["tool-hangup", "tool-updater"]);
+    assert.deepEqual(input.tool_ids, ["tool-updater"]);
     assert.ok(input.conversation_flow.nodes.every((node) => !("tools" in node) && !("model" in node)));
     if (path === "/ai/assistants") {
       assert.equal(key, this.store.state.assistant_creation_pending?.idempotency_key);
@@ -94,7 +94,7 @@ class Registry implements ResourceApi {
 }
 
 // Approved wording, safe defaults and graph references are checked together.
-test("follow-up assistant keeps greeting/defaults and scopes the updater to orientation", () => {
+test("support assistant keeps ticket context and scopes model tools for MCP FAQ", () => {
   assert.equal(DEFINITION.instructions, ASSISTANT_INSTRUCTIONS);
   assert.equal(DEFINITION.greeting, "");
   assert.equal(DEFINITION.dynamic_variables_webhook_url, "https://function.example.invalid/init");
@@ -104,17 +104,20 @@ test("follow-up assistant keeps greeting/defaults and scopes the updater to orie
   for (const key of [...WRITABLE_DYNAMIC_VARIABLE_KEYS, ...CREATED_TICKET_VARIABLE_KEYS]) assert.equal(DEFINITION.dynamic_variables[key], "");
   assert.deepEqual(DEFINITION.enabled_features, ["telephony"]);
   assert.deepEqual(DEFINITION.mcp_servers, [{ id: "mcp-example", allowed_tools: ["list_topics", "read_short_answer", "read_long_answer"] }]);
-  assert.equal(DEFINITION.conversation_flow.nodes.length, 8);
-  const prompt = DEFINITION.conversation_flow.nodes.find((node) => node.type === "prompt" && node.id === "conversation")!;
+  assert.equal(DEFINITION.conversation_flow.nodes.length, 10);
+  const prompt = DEFINITION.conversation_flow.nodes.find((node) => node.type === "prompt" && node.id === "faq_short")!;
   assert.ok(prompt.type === "prompt");
-  assert.equal(prompt.instructions, CONVERSATION_PROMPT);
+  assert.equal(prompt.instructions, FAQ_SHORT_PROMPT);
   assert.equal(prompt.instructions_mode, "append");
   assert.deepEqual(prompt.shared_tool_ids, []);
-  assert.equal(prompt.tools_mode, "replace");
+  assert.equal(prompt.tools_mode, "append");
+  assert.deepEqual(DEFINITION.tool_ids, ["tool-updater"]);
+  const terminal = DEFINITION.conversation_flow.nodes.find(node => node.id === "hangup")!;
+  assert.ok(terminal.type === "tool"); assert.equal(terminal.shared_tool_id, "tool-hangup");
   assert.equal(DEFINITION.conversation_flow.nodes[0].type === "speak" && DEFINITION.conversation_flow.nodes[0].message, "{{greeting_text}}");
   const goodbye = DEFINITION.conversation_flow.nodes.find(node => node.id === "goodbye")!;
   assert.equal(goodbye.type === "speak" && goodbye.message, GOODBYE_MESSAGE);
-  const end = DEFINITION.conversation_flow.edges.find(edge => edge.id === "conversation_to_goodbye")!;
+  const end = DEFINITION.conversation_flow.edges.find(edge => edge.id === "orientation_to_goodbye")!;
   assert.equal(end.condition.type === "llm" && end.condition.prompt, END_CONVERSATION_CONDITION);
   const orientation = DEFINITION.conversation_flow.nodes.find(node => node.id === "orientation")!;
   assert.equal(orientation.type === "prompt" && orientation.instructions, ORIENTATION_PROMPT);
@@ -122,13 +125,13 @@ test("follow-up assistant keeps greeting/defaults and scopes the updater to orie
   assert.ok(!DEFINITION.tool_ids.includes("tool-create-ticket"));
   assert.throws(() => buildAssistant("http://unsafe.invalid", "telnyx-fde", "mcp", TOOL_IDS));
   assert.throws(() => buildAssistant("https://safe.invalid", "telnyx-fde", "", TOOL_IDS));
-  assert.throws(() => buildFollowUpWorkflow({ ...TOOL_IDS, set_support_variables: "tool-hangup" }));
+  assert.throws(() => buildSupportWorkflow({ ...TOOL_IDS, set_support_variables: "tool-hangup" }));
 });
 
 // Invalid graphs fail locally, before an API request or any provisioning write.
 test("graph validation rejects missing/duplicate ids, invalid routing and unknown tools", () => {
-  const mutate = (change: (flow: ReturnType<typeof buildFollowUpWorkflow>) => void) => {
-    const flow = buildFollowUpWorkflow(TOOL_IDS); change(flow);
+  const mutate = (change: (flow: ReturnType<typeof buildSupportWorkflow>) => void) => {
+    const flow = buildSupportWorkflow(TOOL_IDS); change(flow);
     assert.throws(() => validateConversationFlow(flow, Object.values(TOOL_IDS)));
   };
   mutate((flow) => { flow.start_node_id = "missing"; });
@@ -154,10 +157,10 @@ test("context and status guards prevent empty or failed-context status delivery"
   })?.target.node_id;
   assert.equal(next({ init_ok: false, tickets_count: 0, selected_ticket_status_text: "" }), "context_unavailable");
   assert.equal(next({ init_ok: false, tickets_count: 2, selected_ticket_status_text: "stale" }), "context_unavailable");
-  assert.equal(next({ init_ok: true, tickets_count: 0, selected_ticket_status_text: "stale" }), "conversation");
+  assert.equal(next({ init_ok: true, tickets_count: 0, selected_ticket_status_text: "stale" }), "faq_short");
   assert.equal(next({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "" }), undefined);
   assert.equal(next({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "Backend status." }), "ticket_status");
-  for (const source of ["ticket_status", "ticket_status_error"]) {
+  for (const source of ["ticket_status", "ticket_status_error", "resolution", "faq_error"]) {
     const edge = DEFINITION.conversation_flow.edges.find(edge => edge.start_node_id === source)!;
     assert.equal(edge.condition.type, "default"); assert.equal(edge.target.node_id, "hangup");
     const node = DEFINITION.conversation_flow.nodes.find(node => node.id === source)!;
@@ -166,6 +169,35 @@ test("context and status guards prevent empty or failed-context status delivery"
     assert.equal(node.message.split(GOODBYE_MESSAGE).length, 2);
     if (source === "ticket_status") assert.equal(node.message, `{{selected_ticket_status_text}} ${GOODBYE_MESSAGE}`);
   }
+});
+
+// A successful title lookup closes through the existing goodbye Speak. There
+// is no long branch or writable FAQ state, while the public MCP still has tools.
+test("title-only FAQ closes through goodbye without a long-answer branch", () => {
+  const flow = DEFINITION.conversation_flow;
+  const shorts = flow.edges.filter(edge => edge.start_node_id === "faq_short");
+  assert.ok(shorts.every(edge => edge.condition.type === "llm"));
+  assert.deepEqual(shorts.map(edge => edge.target.node_id).sort(), ["faq_error", "goodbye", "resolution"]);
+  const finished = shorts.find(edge => edge.target.node_id === "goodbye")!;
+  assert.ok(finished.condition.type === "llm"); assert.match(finished.condition.prompt, /announced the exact page title/);
+  const short = flow.nodes.find(node => node.id === "faq_short")!;
+  assert.ok(short.type === "prompt");
+  // Each documented routing call must exist on the current node, not be a
+  // fabricated tool or an automatic comparison that preempts preparation.
+  const calls = [...new Set([...short.instructions.matchAll(/transition__([a-z_]+)/g)].map(match => match[1]))];
+  assert.deepEqual(calls.sort(), shorts.map(edge => edge.id).sort());
+  const goodbye = flow.nodes.find(node => node.id === "goodbye")!;
+  assert.ok(goodbye.type === "speak"); assert.equal(goodbye.message, GOODBYE_MESSAGE);
+  const exit = flow.edges.find(edge => edge.start_node_id === "goodbye")!;
+  assert.equal(exit.condition.type, "default"); assert.equal(exit.target.node_id, "hangup");
+  assert.ok(!flow.nodes.some(node => node.id.startsWith("faq_long")));
+  assert.ok(!Object.keys(DEFINITION.dynamic_variables).some(key => key.startsWith("faq_")));
+  assert.ok(!flow.nodes.some(node => node.type === "prompt" && node.shared_tool_ids.includes(TOOL_IDS.hangup)));
+  const noMatch = flow.nodes.find(node => node.id === "resolution")!;
+  const error = flow.nodes.find(node => node.id === "faq_error")!;
+  assert.ok(noMatch.type === "speak" && error.type === "speak");
+  assert.match(noMatch.message, /does not cover/); assert.match(error.message, /couldn't retrieve/);
+  assert.ok(!flow.nodes.some(node => node.id === "conversation"));
 });
 
 // Account availability is a GET; failure never silently picks another model.
@@ -209,10 +241,31 @@ test("merged updater reads preserve ids and reject an expanded variable allowlis
   fields.updatable_variables.push({ name: "technician_available", type: "string" });
   assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
   const current = api.items.get(first.resource.id)!;
-  (current.tools as unknown[]).pop();
+  (current.tools as unknown[]).push({ type: "hangup", shared: true, hangup: { description: "Unexpected model hangup" } });
   assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
   assert.equal(api.items.size, 1);
   assert.equal(api.calls.filter(call => call.method === "POST" && call.path === "/ai/assistants").length, 1);
+});
+
+// Changing a FAQ node to replace mode could drop inherited MCP tools. It is
+// configuration drift and must be repaired rather than silently reused.
+test("FAQ tool inheritance and MCP allowlist drift update the same assistant", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  const resource = api.items.get(first.resource.id)!;
+  const flow = resource.conversation_flow as typeof DEFINITION.conversation_flow;
+  const short = flow.nodes.find(node => node.id === "faq_short")!;
+  assert.ok(short.type === "prompt"); short.tools_mode = "replace";
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
+  // A stale model-visible HANGUP would allow early cutoff before the Speak.
+  const repairedFlow = api.items.get(first.resource.id)!.conversation_flow as typeof DEFINITION.conversation_flow;
+  const repairedShort = repairedFlow.nodes.find(node => node.id === "faq_short")!;
+  assert.ok(repairedShort.type === "prompt"); repairedShort.shared_tool_ids = [TOOL_IDS.hangup];
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
+  const current = api.items.get(first.resource.id)!;
+  (current.mcp_servers as { allowed_tools: string[] }[])[0].allowed_tools.push("unapproved-tool");
+  assert.equal((await upsertAssistant(api, store, DEFINITION)).action, "updated");
+  assert.equal(api.items.size, 1);
 });
 
 // A discovered id must also be hydrated, even when no id survived locally.
