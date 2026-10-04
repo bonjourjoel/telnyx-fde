@@ -25,6 +25,7 @@ export interface DeploymentState extends Record<string, unknown> {
   assistant_id?: string; assistant_name?: string; assistant_model?: string;
   assistant_version_id?: string; assistant_default_texml_app_id?: string;
   assistant_creation_pending?: CreationCheckpoint;
+  runtime_api_binding_id?: string;
 }
 export interface DeploymentStateStore {
   load(): Promise<DeploymentState>;
@@ -39,6 +40,7 @@ const StateSchema = z.object({
   shared_tool_pending: z.record(z.string(), CheckpointSchema).optional(),
   assistant_id: z.string().min(1).optional(),
   assistant_creation_pending: CheckpointSchema.optional(),
+  runtime_api_binding_id: z.uuid().optional(),
 }).passthrough();
 
 // Preserve future fields, while refusing malformed shared-tool tracking data.

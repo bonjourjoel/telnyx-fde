@@ -67,7 +67,8 @@ export function matchesDesired(actual: unknown, desired: unknown, exactObject = 
 
 // Read all pages, supporting the documented bare MCP list and observed gateway
 // envelopes. Failed, repeated, or inconsistent reads never establish absence.
-async function listMatches<T>(api: ResourceApi, adapter: ResourceAdapter<T>): Promise<T[]> {
+export async function listMatches<T>(api: ResourceApi,
+  adapter: Pick<ResourceAdapter<T>, "kind" | "collection" | "listMode" | "parse" | "id" | "matches">): Promise<T[]> {
   const seen = new Set<string>();
   const matches: T[] = [];
   for (let page = 1; page <= 100; page += 1) {

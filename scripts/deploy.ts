@@ -7,6 +7,8 @@
 //
 // Backend provisioning, MCP/shared tools, and the minimal assistant from step 9:
 //   Preflight: typecheck, then the shared full local test suite, before .env.
+//   Runtime credential: validate the org SDK binding; renew only confirmed
+//   invalid/expired tokens on that same resource before storage/secrets/ship.
 //   1. Load .env (Node 24 process.loadEnvFile), confirm TELNYX_API_KEY.
 //   2. Load deployment-state.json (or {}).
 //   3. Resolve the KV namespace by id, then by name, then by creation. Never
@@ -67,6 +69,7 @@ import { syncSharedTools } from "./lib/shared-tools";
 import { buildAssistant, ASSISTANT_MODEL, FAQ_TOOL_NAMES } from "../config/assistant";
 import { assertAssistantModelAvailable, upsertAssistant } from "./lib/assistant";
 import { runLocalTests } from "./run-tests";
+import { ensureRuntimeBinding } from "./lib/runtime-binding";
 
 const execFileAsync = promisify(execFile);
 
@@ -772,6 +775,12 @@ async function main(): Promise<void> {
 
   // 2. State.
   let state = await stateStore.load();
+
+  // Validate the real organization credential before the expensive Function ship.
+  // Metadata status=active is insufficient; invalid/expired tokens need renewal.
+  const runtimeBinding = await ensureRuntimeBinding(getRestApi(), stateStore);
+  console.log(JSON.stringify({ operation: "runtime_binding_preflight", ...runtimeBinding }));
+  state = await stateStore.load();
 
   // 3. KV namespace.
   const kvId = await resolveKvNamespace(state);

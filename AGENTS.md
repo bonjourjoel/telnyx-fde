@@ -1463,10 +1463,28 @@ SDK's HTTP status only. readSupportConfig wraps exceptions without retaining raw
 messages or causes. Protected /admin/check-config returns kv.error.code and an
 optional upstream_status; kv_read logs contain the same safe category/status.
 The direct KV REST read succeeded while the Function binding failed. Joel's next
-deployment identified upstream HTTP 401 (authentication). telnyx.toml now declares
-[telnyx] binding = "TELNYX" to request authenticated API wiring during ship. Local
-types were regenerated; the effect on the runtime 401 is not yet verified by a
-real deployment. Namespace, values, caller HMAC and resource ids are preserved.
+deployment identified upstream HTTP 401 (authentication). Adding the per-function
+TELNYX declaration did not fix it. Account GET /v2/compute/bindings found the real
+organization telnyx-sdk binding, separate from the per-function descriptor.
+Its server validation returned "binding token is invalid or expired". Renewing
+the existing binding restored successful validation and runtime KV HTTP 200
+without another ship. The same id is kept as runtime_api_binding_id in ignored
+deployment state; no token values are persisted or logged. Do not confuse the
+two kinds of binding or treat CLI validation exit code 0 as proof of validity.
+The step 8/9 comparison found no runtime source, manifest or lockfile change.
+Logs showed KV OK at 15:37 and failure at 15:47 Europe/Paris on the same deployed
+revision. Token expiration versus invalidation was not distinguished by the API.
+deploy.ts now calls ensureRuntimeBinding from scripts/lib/runtime-binding.ts
+before storage provisioning, secret writes and ship. It discovers the sole
+organization telnyx-sdk binding through paginated GET /v2/compute/bindings and
+validates with POST /v2/compute/bindings/{id}/actions/validate. Valid bindings are
+reused. Only the observed invalid/expired-token response permits PUT renewal on
+the same id, followed by GET and revalidation. Missing/duplicate/conflicting
+resources or failed reads stop; no new binding is created. Unknown PUT outcomes
+are reconciled by reads, not another renewal. Only the id is saved; ignore any
+credential values in responses. Local tests cover these paths, and two real
+preflight runs reused the healthy binding without renewal. Namespace, values,
+caller HMAC and resource ids are preserved.
 A missing binding
 id in the local CLI configuration does not prove the server binding is absent.
 

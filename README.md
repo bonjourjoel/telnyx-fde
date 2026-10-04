@@ -526,11 +526,28 @@ response/configuration and a missing binding. Failure still returns HTTP 500.
 
 During the Portal investigation, the namespace/configuration read returned 200
 directly, but reading through the Function binding failed. The deployed diagnostic
-identified upstream HTTP 401 (authentication). The manifest now explicitly
-declares `[telnyx] binding = "TELNYX"`, requesting Telnyx's authenticated API wiring
-on ship. This targets the runtime credential path used by the SDK's KV client;
-the namespace id and stored values are preserved. The effect on the 401 still
-requires a real deployment and configuration read-back.
+identified upstream HTTP 401 (authentication). Adding the per-function `TELNYX`
+declaration did not resolve it. Comparing step 8 and step 9 showed no changes in
+runtime source, manifest or dependency lock. Server logs showed KV OK at 15:37
+Europe/Paris and an error at 15:47, with no ship between those requests.
+
+The real organization `telnyx-sdk` binding was found through the account binding
+inventory. Server validation reported "binding token is invalid or expired".
+Renewing that existing binding, without changing its id or deploying again,
+restored valid authentication and `/admin/check-config` HTTP 200 immediately.
+The non-secret id is saved as runtime_api_binding_id in local deployment state.
+Validation alone can return CLI exit code 0 even for an invalid token: inspect
+the returned validity, not just the process exit code. No key value is logged.
 The CLI had no default binding id configured locally, which alone establishes
-neither absence nor invalidity of the server-side binding. Do not reset resources
-or rotate credentials based on that local metadata gap.
+neither absence nor invalidity of the server-side binding.
+
+`deploy.ts` now calls `ensureRuntimeBinding` before storage provisioning, secret
+updates and ship. The helper fully lists account bindings, selects the unique
+`telnyx-sdk` organization binding, saves only its id, and calls the observed
+`POST /v2/compute/bindings/{id}/actions/validate` endpoint. Valid tokens are reused.
+Only the confirmed invalid/expired-token result triggers PUT on the same id,
+followed by GET and successful revalidation. Unreadable, missing, duplicate or
+conflicting bindings stop deployment; no new binding is created automatically.
+Lost renewal responses are reconciled without another PUT. Token values are
+neither printed nor persisted. Two real preflight checks reused the healthy
+binding without renewing it; expiry/renewal paths are covered by offline tests.
