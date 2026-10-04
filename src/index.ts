@@ -4,6 +4,7 @@
 import { STAGE, OUTCOME } from "./logging";
 import { verifyAdminSecret } from "./security";
 import { readSupportConfig } from "./support-config";
+import { diagnoseKvError, type KvDiagnostic } from "./kv-errors";
 import { handleMcpRequest } from "./mcp";
 import { handleInit } from "./http/init";
 import { handleCreateTicket } from "./http/create-ticket";
@@ -71,9 +72,11 @@ async function handleCheckConfig(req: Request, context: HttpContext): Promise<Re
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   let technicianAvailable: boolean | null = null;
+  let kvError: KvDiagnostic | undefined;
   try {
     technicianAvailable = (await observe(context, "kv_read", () => readSupportConfig(context.env))).technician_available;
-  } catch {
+  } catch (error) {
+    kvError = diagnoseKvError(error);
     // The diagnostic keeps its structured failure response, never a fake flag.
   }
   const checks = [
@@ -87,7 +90,8 @@ async function handleCheckConfig(req: Request, context: HttpContext): Promise<Re
   const kvOk = technicianAvailable !== null;
   const ok = kvOk && allPresent;
   context.outcome = ok ? OUTCOME.OK : OUTCOME.ERROR;
-  return Response.json({ ok, kv: { ok: kvOk, technician_available: technicianAvailable },
+  return Response.json({ ok, kv: { ok: kvOk, technician_available: technicianAvailable,
+      ...(kvError ? { error: kvError } : {}) },
     secrets: { required: checks.map((check) => check.name), present, all_present: allPresent },
   }, { status: ok ? 200 : 500 });
 }

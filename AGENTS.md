@@ -806,8 +806,16 @@ Programmable phone entry point:
 - It does not conduct any conversation.
 - Once started, the Conversation Workflow takes control.
 
-Portal voice tests use web_call and reach the same assistant callbacks without
-the project's phone number entry point. Use them for routine conversational,
+Assumption correction after real tests on 2026-10-04: two Portal voice sessions
+were recorded as phone_call with the same non-phone target. The backend now
+supports an explicitly configured portal_demo_target_sha256 exact match for
+that target. It selects the existing web_demo_identity Actor only for this pin;
+valid phone numbers keep their phone HMAC and other invalid targets fail shut.
+The generic channel documentation remains reference material, not proof that
+every Portal voice button emits web_call. No native fields are invented.
+
+Portal voice tests reach the same assistant callbacks without the project's
+phone number entry point. Use them for routine conversational,
 FAQ, and ticket smoke tests. Real phone access and transfer validation remain
 part of the challenge's final verification.
 
@@ -1111,6 +1119,11 @@ For phone_call, the same normalized phone number resolves to the same Actor.
 Preserve the existing phone HMAC scheme so deployed caller records stay reachable.
 
 For web_call, the identity is web_demo_identity in support/config KV.
+The explicitly pinned non-phone Portal phone_call target uses the same identity.
+portal_demo_target_sha256 is backend configuration only; deploy fills a missing
+value from the observed project default, preserves existing values and accepts
+null to disable the alias. Never log the target or expose the fingerprint as a
+model-editable field. Initialization, creation and fixtures share the resolver.
 Use a domain-separated HMAC of this configured label with the stable HMAC secret.
 All Portal smoke tests and web fixtures use that same demo Actor. Ignore caller
 targets or demo identity labels supplied in web requests. Missing/invalid demo
@@ -1147,6 +1160,8 @@ No custom lock is needed.
 operation_id prevents a repeated webhook from creating two tickets.
 
 For phone_call, retain the HMAC derived from caller identity and call_control_id.
+This applies to real phone identities. For the pinned Portal demo alias, use
+data.id just as for web_call; a missing id disables creation with no random id.
 For web_call, derive a separate operation HMAC from demo Actor identity and the
 documented data.id of assistant.initialization. It identifies an initialization
 event, not a guaranteed native web session. Replays of the same event use the
@@ -1441,6 +1456,16 @@ Purpose: callback signatures, raw body, and variable format.
 Title: Receiving Webhooks
 URL: https://developers.telnyx.com/docs/development/api-fundamentals/webhooks/receiving-webhooks
 Purpose: signature verification and webhook handling.
+
+KV troubleshooting update:
+src/kv-errors.ts classifies dependency failures using fixed categories and the
+SDK's HTTP status only. readSupportConfig wraps exceptions without retaining raw
+messages or causes. Protected /admin/check-config returns kv.error.code and an
+optional upstream_status; kv_read logs contain the same safe category/status.
+The direct KV REST read succeeded while the Function binding failed. The runtime
+failure is not repaired yet: deploy this diagnostic and inspect its result before
+changing authentication, permissions or binding configuration. A missing binding
+id in the local CLI configuration does not prove the server binding is absent.
 
 Title: Logs
 URL: https://developers.telnyx.com/docs/edge-compute/observability/logs

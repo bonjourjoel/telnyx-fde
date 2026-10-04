@@ -21,7 +21,7 @@
 //
 // These logs are the Function's primary observability surface; the Telnyx
 // platform also produces HTTP invocation logs and metrics (see
-// docs/debugging.md and the README observability section).
+// the README observability section).
 
 // ---------------------------------------------------------------------------
 // Stage and outcome vocabularies
@@ -108,6 +108,7 @@ export const DETAIL_KEYS = [
   "tool_name",
   "topic_id",
   "record_type",
+  "kv_failure_code",
 ] as const;
 export type DetailKey = (typeof DETAIL_KEYS)[number];
 
@@ -134,6 +135,8 @@ export interface LogDetail {
   topic_id?: string;
   // Telnyx envelope record_type (e.g. "event"). Bounded + pattern-checked.
   record_type?: string;
+  // Fixed dependency error category; never the KV exception message or body.
+  kv_failure_code?: string;
 }
 
 // Safe-character pattern shared by string detail fields. Rejects anything that

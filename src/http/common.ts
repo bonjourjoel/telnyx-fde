@@ -4,6 +4,7 @@
 import { DEFAULT_INIT_DYNAMIC_VARIABLES, isSupportChannel, type SupportIdentityRequest } from "../contracts";
 import { errorCode, logEvent, OUTCOME, type Stage, type Outcome } from "../logging";
 import { readRawBody, verifyTelnyxSignature } from "../security";
+import { SupportConfigError } from "../kv-errors";
 
 // Only the injected runtime secrets required by these HTTP handlers.
 export interface RuntimeSecrets {
@@ -85,7 +86,10 @@ export async function observe<T>(context: HttpContext, operation: string, fn: ()
     return result;
   } catch (error) {
     logEvent({ request_id: context.request_id, stage: context.stage, operation,
-      outcome: OUTCOME.ERROR, duration_ms: Date.now() - start, error_code: errorCode(error) });
+      outcome: OUTCOME.ERROR, duration_ms: Date.now() - start, error_code: errorCode(error),
+      ...(error instanceof SupportConfigError ? { detail: { kv_failure_code: error.diagnostic.code,
+        ...(error.diagnostic.upstream_status ? { http_status: error.diagnostic.upstream_status } : {}) } } : {}),
+    });
     throw error;
   }
 }

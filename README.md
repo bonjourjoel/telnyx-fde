@@ -173,7 +173,8 @@ context still allows follow-up but disables creation. Phone `operation_id` stays
 a domain-separated HMAC of the caller key and `call_control_id`; another delivery
 event id does not change it.
 
-For Portal `web_call`, the actor key comes only from `web_demo_identity` in KV.
+For `web_call` and explicitly pinned Portal tests, the actor key comes only from
+`web_demo_identity` in KV.
 The initialization event's documented `data.id` determines a separate operation
 HMAC. Replaying the same event preserves the operation; a different event gets a
 new operation on the same demo Actor. This is an event id, not a guaranteed native
@@ -184,6 +185,19 @@ No random operation id is generated. Neither raw call/event ids nor the demo
 label are returned or logged. Default variables are in `src/contracts.ts`.
 
 ### Stable Portal demo identity
+
+Two real Portal voice tests on 2026-10-04 were recorded as `phone_call` with the
+same non-phone target. `portal_demo_target_sha256` explicitly pins that target's
+SHA-256 fingerprint in backend KV. Deployment fills only a missing fingerprint,
+using the verified project default; existing values are preserved. Set it to
+null to disable this alias. No raw target or test phone number is stored in Git
+or logged. This observed marker is not a guaranteed Telnyx Portal contract.
+
+Valid phone numbers always retain their original phone HMAC, even if a configured
+fingerprint matches one. Other missing/non-phone identities never select a demo
+Actor. The pinned target, `web_call`, and web fixtures share one demo Actor and
+event-based operation ids. The existing protected webhook presets require no
+additional model arguments.
 
 Backend configuration in the existing `support/config` KV key is:
 
@@ -501,3 +515,18 @@ Contracts follow the official [workflow guide](https://developers.telnyx.com/doc
 [Update Assistant](https://developers.telnyx.com/api-reference/assistants/update-an-assistant),
 [List Assistants](https://developers.telnyx.com/api-reference/assistants/list-assistants),
 and [voice model documentation](https://developers.telnyx.com/docs/voice/conversational-ai/quickstart).
+
+## KV failure diagnosis
+
+The protected `/admin/check-config` includes `kv.error` on a failed read: a fixed
+`code` and, when available, `upstream_status`. Runtime `kv_read` errors log the
+same category and HTTP status without the SDK message, response body or token.
+Categories distinguish authentication, permission, network, timeout, invalid
+response/configuration and a missing binding. Failure still returns HTTP 500.
+
+During the Portal investigation, the namespace/configuration read returned 200
+directly, but reading through the Function binding failed. The new diagnostics
+must be deployed to identify that upstream failure; it is not yet repaired.
+The CLI had no default binding id configured locally, which alone establishes
+neither absence nor invalidity of the server-side binding. Do not reset resources
+or rotate credentials based on that local metadata gap.

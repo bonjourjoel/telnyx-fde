@@ -220,8 +220,9 @@ export function isSupportChannel(value: unknown): value is SupportChannel {
   return value === "phone_call" || value === "web_call";
 }
 
-// Caller selection comes from native preset values. A web request never chooses
-// its demo identity; the backend reads that identity from its KV configuration.
+// Caller selection comes from native preset values. Valid phone identities keep
+// their HMAC. Web calls and an explicitly pinned non-phone Portal target use the
+// backend demo identity. Requests never choose the demo label or fingerprint.
 export type SupportIdentityRequest =
   | { conversation_channel: "phone_call"; caller_phone: string }
   | { conversation_channel: "web_call"; caller_phone?: string };

@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const LOCAL_TEST_FILES = [
   "scripts/check-caller-tickets.ts",
   "scripts/check-http.ts",
+  "scripts/check-kv.test.ts",
   "scripts/check-mcp.test.ts",
   "scripts/check-mcp-registration.test.ts",
   "scripts/check-resource-upsert.test.ts",

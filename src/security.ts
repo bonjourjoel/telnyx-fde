@@ -235,6 +235,13 @@ export async function computeWebDemoKey(identity: string, hmacSecret: string): P
   return hmacDigest("support-web-demo:v1:" + JSON.stringify(identity), hmacSecret);
 }
 
+// Compare an explicit Portal target fingerprint without storing its raw value.
+// This fingerprint is only a gate; demo Actor keys still use the stable HMAC.
+export async function computePortalTargetHash(target: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(target.trim()));
+  return bytesToHex(new Uint8Array(digest));
+}
+
 // The documented initialization event id is an event identifier, not a
 // guaranteed native web session id. Replaying that event derives the same
 // operation; missing ids disable creation instead of generating random ids.

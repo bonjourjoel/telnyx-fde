@@ -8,7 +8,7 @@ import { test } from "node:test";
 import type { ActorContext } from "@telnyx/edge-runtime";
 import { routeRequest } from "../src/index";
 import { CallerTickets } from "../src/actors/caller-tickets";
-import { computeCallerKey, computeTicketOperationId } from "../src/security";
+import { computeCallerKey, computeTicketOperationId, computePortalTargetHash } from "../src/security";
 import { MAX_SUBJECT_LENGTH, MAX_DESCRIPTION_LENGTH, type DemoTicketInput, type InitDynamicVariables } from "../src/contracts";
 import type { RuntimeSecrets } from "../src/http/common";
 import { submitDemoFixtures } from "./seed-demo";
@@ -43,6 +43,7 @@ class TestStorage {
 class System {
   config: unknown = { technician_available: false, web_demo_identity: "synthetic-private-web-demo" };
   kvFails = false;
+  kvFailure?: Error;
   actorFails = false;
   malformedResult = false;
   readonly actorKeys: string[] = [];
@@ -54,6 +55,7 @@ class System {
   constructor() {
     this.env = {
       SUPPORT_CONFIG: { get: async () => {
+        if (this.kvFailure) throw this.kvFailure;
         if (this.kvFails) throw new Error("sensitive-kv-error-marker");
         return structuredClone(this.config);
       } },
@@ -312,6 +314,66 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.notEqual(operation, await computeTicketOperationId("another-caller", "same-call", secrets.caller_hmac_key));
     });
 
+    await t.test("KV diagnostic exposes only fixed categories and upstream status", async () => {
+      const system = new System();
+      system.kvFailure = new Error('env KV get("support/config") failed: HTTP 403: Bearer synthetic-private-upstream-token');
+      const response = await routeRequest(new Request("https://local.invalid/admin/check-config", {
+        headers: { "x-admin-secret": secrets.admin_secret! },
+      }), system.env, secrets);
+      assert.equal(response.status, 500);
+      const body = await response.json();
+      assert.deepEqual(body.kv.error, { code: "permission", upstream_status: 403 });
+      assert.ok(!JSON.stringify(body).includes("synthetic-private-upstream-token"));
+    });
+
+    await t.test("explicit Portal phone_call target shares web demo fixtures and event idempotence", async () => {
+      const system = new System();
+      const target = "synthetic-private-portal-target";
+      system.config = { technician_available: false, web_demo_identity: "synthetic-private-web-demo",
+        portal_demo_target_sha256: await computePortalTargetHash(target) };
+      const seed = new Request("https://local.invalid/admin/seed", { method: "POST",
+        headers: { "x-admin-secret": secrets.admin_secret! },
+        body: JSON.stringify({ conversation_channel: "web_call", tickets: [fixture("portal-fixture")] }) });
+      assert.equal((await routeRequest(seed, system.env, secrets)).status, 200);
+      const event = initialization(target);
+      const first = await variables(await routeRequest(signedRequest("/init", event), system.env, secrets));
+      assert.equal(first.init_ok, true);
+      assert.equal(first.tickets_count, 1);
+      assert.equal(first.can_create_ticket, true);
+      const create = { ...creation(first.operation_id), caller_phone: target };
+      const created = await (await routeRequest(signedRequest("/tickets/create", create), system.env, secrets)).json();
+      const repeated = await (await routeRequest(signedRequest("/tickets/create", create), system.env, secrets)).json();
+      assert.deepEqual(repeated, created);
+      const replay = await variables(await routeRequest(signedRequest("/init", event), system.env, secrets));
+      assert.equal(replay.operation_id, first.operation_id);
+      event.data.id = "another-private-portal-event";
+      const next = await variables(await routeRequest(signedRequest("/init", event), system.env, secrets));
+      assert.notEqual(next.operation_id, first.operation_id);
+      assert.equal(next.tickets_count, 2);
+      const web = await variables(await routeRequest(signedRequest("/init", webInitialization()), system.env, secrets));
+      assert.equal(web.tickets_count, 2);
+      assert.equal(new Set(system.actorKeys).size, 1);
+      delete (event.data as { id?: string }).id;
+      const missing = await variables(await routeRequest(signedRequest("/init", event), system.env, secrets));
+      assert.equal(missing.init_ok, true);
+      assert.equal(missing.can_create_ticket, false);
+    });
+
+    await t.test("Portal opt-in never replaces valid phones or accepts other anonymous targets", async () => {
+      const system = new System();
+      system.config = { technician_available: false, web_demo_identity: "synthetic-private-web-demo",
+        portal_demo_target_sha256: await computePortalTargetHash(PHONE) };
+      const phone = await variables(await routeRequest(signedRequest("/init", initialization()), system.env, secrets));
+      assert.equal(phone.init_ok, true);
+      assert.equal(system.actorKeys[0], await computeCallerKey(PHONE, secrets.caller_hmac_key));
+      const count = system.actorKeys.length;
+      const unknown = await variables(await routeRequest(signedRequest("/init", initialization("unknown-private-target")), system.env, secrets));
+      assert.equal(unknown.init_ok, false);
+      assert.equal(system.actorKeys.length, count);
+      const unsigned = new Request("https://local.invalid/init", { method: "POST", body: JSON.stringify(initialization("synthetic-private-portal-target")) });
+      assert.equal((await routeRequest(unsigned, system.env, secrets)).status, 401);
+    });
+
     await t.test("web initialization, creation and fixtures share one configured demo actor", async () => {
       const system = new System();
       const webSeed = () => new Request("https://local.invalid/admin/seed", {
@@ -407,7 +469,8 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.equal(first.changed, true);
       assert.equal(first.value.web_demo_identity, "portal-demo");
       assert.equal(first.value.technician_available, false);
-      const original = { technician_available: true, web_demo_identity: "explicit-stable-demo", extra: "private-setting" };
+      const original = { technician_available: true, web_demo_identity: "explicit-stable-demo",
+        portal_demo_target_sha256: null, extra: "private-setting" };
       const second = prepareSupportConfig(original);
       const third = prepareSupportConfig(second.value);
       assert.equal(second.changed, false);
@@ -420,6 +483,7 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.equal(prepareSupportConfig(legacy.value).changed, false);
       assert.throws(() => prepareSupportConfig({ technician_available: true, web_demo_identity: "" }));
       assert.throws(() => prepareSupportConfig({ technician_available: "false" }));
+      assert.throws(() => prepareSupportConfig({ technician_available: true, portal_demo_target_sha256: "invalid" }));
     });
 
     await t.test("fixture script validates local config and handles sanitized HTTP rejection offline", async () => {
@@ -453,6 +517,7 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       for (const marker of [PHONE, "tel:+1 (202) 555-0123", "synthetic-private-subject-marker",
         "synthetic-private-description-marker", "sensitive-storage-error-marker", "sensitive-actor-error-marker",
         "sensitive-kv-error-marker", "synthetic-private-web-demo", "synthetic-private-web-event-1",
+        "synthetic-private-portal-target", "another-private-portal-event", "synthetic-private-upstream-token",
         "synthetic-private-web-event-2", secrets.admin_secret!, secrets.caller_hmac_key!, secrets.public_key!]) {
         assert.ok(!output.includes(marker));
       }

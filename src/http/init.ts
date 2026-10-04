@@ -7,7 +7,7 @@ import {
 } from "../contracts";
 import { OUTCOME } from "../logging";
 import { computeTicketOperationId, computeWebTicketOperationId } from "../security";
-import { resolveSupportActorKey } from "../identity";
+import { resolveSupportIdentity } from "../identity";
 import { readSupportConfig } from "../support-config";
 import { HttpError, isObject, observe, signedJson, type HttpContext } from "./common";
 
@@ -55,14 +55,14 @@ export async function handleInit(req: Request, context: HttpContext): Promise<Re
         conversation_channel: channel,
         caller_phone: typeof payload.telnyx_end_user_target === "string" ? payload.telnyx_end_user_target : "",
       };
-      const key = await resolveSupportActorKey(identity, context.env, context.secrets.caller_hmac_key,
-        channel === "web_call" ? await configuration : undefined);
-      if (!key) throw new HttpError(422, "caller_identity_unusable");
+      const resolved = await resolveSupportIdentity(identity, context.env, context.secrets.caller_hmac_key, configuration);
+      if (!resolved) throw new HttpError(422, "caller_identity_unusable");
+      const key = resolved.actor_key;
       const callId = typeof payload.call_control_id === "string" ? payload.call_control_id : null;
-      const operationId = channel === "web_call"
+      const operationId = resolved.kind === "demo"
         ? await computeWebTicketOperationId(key, data.id, context.secrets.caller_hmac_key)
         : await computeTicketOperationId(key, callId, context.secrets.caller_hmac_key);
-      // Web reads remain available when an event id is missing, but creation
+      // Demo reads remain available when an event id is missing, but creation
       // is disabled. No random id or fake native session field is substituted.
       const tickets = presentTickets(await context.env.CALLER_TICKETS.idFromName(key).listTickets());
       return { tickets, operationId };
