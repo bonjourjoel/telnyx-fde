@@ -123,10 +123,11 @@ export async function verifyTelnyxSignature(
   const signature = req.headers.get(SIGNATURE_HEADER);
   const timestamp = req.headers.get(TIMESTAMP_HEADER);
   if (!signature || !timestamp) return false;
+  if (!/^\d+$/.test(timestamp)) return false;
 
   // Replay window. The timestamp is unix seconds, per the Telnyx guide.
   const tsSeconds = Number(timestamp);
-  if (!Number.isFinite(tsSeconds)) return false;
+  if (!Number.isSafeInteger(tsSeconds)) return false;
   const ageMs = Date.now() - tsSeconds * 1000;
   if (Math.abs(ageMs) > MAX_TIMESTAMP_SKEW_MS) return false;
 
@@ -178,7 +179,7 @@ export async function verifyTelnyxSignature(
 export function normalizePhoneE164(
   input: string | null | undefined,
 ): string | null {
-  if (input === null || input === undefined) return null;
+  if (typeof input !== "string") return null;
   const trimmed = input.trim();
   if (trimmed.length === 0) return null;
 
@@ -188,7 +189,7 @@ export function normalizePhoneE164(
     .replace(/^tel:/i, "");
   // A leading "+" is allowed but not required.
   const digits = cleaned.replace(/^\+/, "");
-  if (!/^\d+$/.test(digits)) return null;
+  if (!/^[1-9]\d+$/.test(digits)) return null;
   if (digits.length < MIN_PHONE_DIGITS || digits.length > MAX_PHONE_DIGITS) {
     return null;
   }
@@ -208,8 +209,30 @@ export async function computeCallerKey(
   if (!normalized) return null;
   if (!hmacSecret) return null;
 
-  // Import the secret as an HMAC-SHA256 key.
-  const keyData = new TextEncoder().encode(hmacSecret);
+  return hmacDigest(normalized, hmacSecret);
+}
+
+// Derive a stable ticket operation for one caller and phone call. Domain
+// separation prevents this HMAC from colliding with the caller-key input.
+// Missing call context disables creation; an event id is not a call identity.
+export async function computeTicketOperationId(
+  callerKey: string,
+  callControlId: string | null | undefined,
+  hmacSecret: string | null | undefined,
+): Promise<string | null> {
+  if (typeof callControlId !== "string" || !callControlId.trim() || !hmacSecret) {
+    return null;
+  }
+  return hmacDigest(
+    "support-ticket:v1:" + JSON.stringify([callerKey, callControlId]),
+    hmacSecret,
+  );
+}
+
+// Shared HMAC implementation for opaque caller and operation identifiers.
+async function hmacDigest(value: string, secret: string): Promise<string> {
+  // Import the stable secret without retaining raw identity in actor state.
+  const keyData = new TextEncoder().encode(secret);
   const hmacKey = await crypto.subtle.importKey(
     "raw",
     keyData,
@@ -217,7 +240,7 @@ export async function computeCallerKey(
     false,
     ["sign"],
   );
-  const data = new TextEncoder().encode(normalized);
+  const data = new TextEncoder().encode(value);
   const digest = new Uint8Array(await crypto.subtle.sign("HMAC", hmacKey, data));
   return bytesToHex(digest);
 }

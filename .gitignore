@@ -4,3 +4,6 @@ node_modules
 # Secrets and local deployment state — never version-controlled.
 .env
 deployment-state.json
+
+# Private demo configuration, including the test caller's number.
+seed-demo.local.json
