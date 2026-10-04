@@ -1,2 +1,6 @@
 .opencode
 node_modules
+
+# Secrets and local deployment state — never version-controlled.
+.env
+deployment-state.json

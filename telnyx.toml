@@ -6,6 +6,9 @@ compatibility_date = "2026-05-01"
 binding = "COUNTER"
 type = "Counter"
 
+[storage.kv.SUPPORT_CONFIG]
+id = "c73e15c6-ce32-4306-ad0a-192deceb7d0f"
+
 [edge_compute]
 func_id = "0768c5c4-b3f2-49a5-b243-21aa1981725e"
 func_name = "telnyx-fde"
