@@ -8,7 +8,10 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx scripts/run-tests.ts",
     "deploy": "tsx scripts/deploy.ts",
-    "resetactor": "tsx scripts/reset-actor.ts"
+    "resetactor": "tsx scripts/reset-actor.ts",
+    "seedticketsweb": "tsx scripts/seed-tickets.ts --web",
+    "seedticketsphone": "tsx scripts/seed-tickets.ts --phone",
+    "help": "tsx scripts/help.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.3.0",

@@ -11,7 +11,8 @@ import { CallerTickets } from "../src/actors/caller-tickets";
 import { computeCallerKey, computeTicketOperationId, computePortalTargetHash } from "../src/security";
 import { MAX_SUBJECT_LENGTH, MAX_DESCRIPTION_LENGTH, type DemoTicketInput, type InitDynamicVariables } from "../src/contracts";
 import type { RuntimeSecrets } from "../src/http/common";
-import { submitDemoFixtures } from "./seed-demo";
+import { submitTicketFixtures } from "./lib/ticket-fixtures";
+import { parseAdminTarget } from "./lib/admin-http";
 import { prepareSupportConfig } from "../src/support-config";
 import { submitActorReset, resetMode, resetTarget } from "./reset-actor";
 
@@ -505,14 +506,15 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
         assert.equal(options?.redirect, "error");
         return Response.json({ added_count: 1 });
       };
-      assert.equal(await submitDemoFixtures(config, secrets.admin_secret!, send), 1);
-      await assert.rejects(submitDemoFixtures({ ...config, base_url: "http://local.invalid" }, secrets.admin_secret!, send));
-      await assert.rejects(submitDemoFixtures({ ...config, caller_phone: "anonymous" }, secrets.admin_secret!, send));
-      await assert.rejects(submitDemoFixtures(config, secrets.admin_secret!, async () =>
+      const target = parseAdminTarget(config);
+      assert.equal(await submitTicketFixtures(target, config.tickets, secrets.admin_secret!, send), 1);
+      assert.throws(() => parseAdminTarget({ ...config, base_url: "http://local.invalid" }));
+      assert.throws(() => parseAdminTarget({ ...config, caller_phone: "anonymous" }));
+      await assert.rejects(submitTicketFixtures(target, config.tickets, secrets.admin_secret!, async () =>
         new Response("sensitive-response-marker", { status: 403 })), { status: 403, code: "seed_request_failed" });
-      await assert.rejects(submitDemoFixtures(config, secrets.admin_secret!, async () => Response.json({ added_count: "1" })));
+      await assert.rejects(submitTicketFixtures(target, config.tickets, secrets.admin_secret!, async () => Response.json({ added_count: "1" })));
       const webConfig = { ...config, conversation_channel: "web_call", caller_phone: undefined };
-      assert.equal(await submitDemoFixtures(webConfig, secrets.admin_secret!, async (_url, options) => {
+      assert.equal(await submitTicketFixtures(parseAdminTarget(webConfig), config.tickets, secrets.admin_secret!, async (_url, options) => {
         const body = JSON.parse(String(options?.body));
         assert.equal(body.conversation_channel, "web_call");
         assert.ok(!Object.hasOwn(body, "caller_phone"));

@@ -159,7 +159,12 @@ test("context and status guards prevent empty or failed-context status delivery"
   assert.equal(next({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "Backend status." }), "ticket_status");
   for (const source of ["ticket_status", "ticket_status_error"]) {
     const edge = DEFINITION.conversation_flow.edges.find(edge => edge.start_node_id === source)!;
-    assert.equal(edge.condition.type, "default"); assert.equal(edge.target.node_id, "goodbye");
+    assert.equal(edge.condition.type, "default"); assert.equal(edge.target.node_id, "hangup");
+    const node = DEFINITION.conversation_flow.nodes.find(node => node.id === source)!;
+    assert.ok(node.type === "speak");
+    assert.ok(node.message.endsWith(GOODBYE_MESSAGE));
+    assert.equal(node.message.split(GOODBYE_MESSAGE).length, 2);
+    if (source === "ticket_status") assert.equal(node.message, `{{selected_ticket_status_text}} ${GOODBYE_MESSAGE}`);
   }
 });
 

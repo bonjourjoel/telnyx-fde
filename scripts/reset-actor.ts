@@ -4,7 +4,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { createDeploymentStateStore, type DeploymentState } from "./lib/deployment-state";
-import { loadAdminSecret, parseAdminTarget, submitAdminRequest } from "./lib/admin-http";
+import { loadAdminSecret, adminTargetFromDeployment, submitAdminRequest } from "./lib/admin-http";
 import { HttpError, isObject } from "../src/http/common";
 
 // Only an explicit --phone selects a real caller. Unknown flags never reset demo.
@@ -16,9 +16,8 @@ export function resetMode(args: readonly string[]): "web_call" | "phone_call" {
 
 // Reuse the recorded live origin; never hard-code a URL or accept a demo label.
 export function resetTarget(state: DeploymentState, mode: "web_call" | "phone_call", privatePhone?: unknown) {
-  if (typeof state.func_url !== "string") throw new Error("deployment URL is missing");
-  return parseAdminTarget({ base_url: state.func_url, conversation_channel: mode,
-    ...(mode === "phone_call" ? { caller_phone: isObject(privatePhone) ? privatePhone.caller_phone : undefined } : {}) });
+  return adminTargetFromDeployment(state, mode === "web_call" ? { conversation_channel: "web_call" } :
+    { conversation_channel: "phone_call", caller_phone: isObject(privatePhone) && typeof privatePhone.caller_phone === "string" ? privatePhone.caller_phone : "" });
 }
 
 // Injectable HTTP seam lets tests assert the exact target without using secrets.

@@ -21,13 +21,15 @@ A Telnyx Edge **StatefulActor** project, scaffolded with `telnyx-edge new-func -
 | `src/support-config.ts` | Shared strict KV feature-flag reader. |
 | `src/identity.ts` | Common phone/web actor identity resolution for initialization, creation, and fixtures. |
 | `scripts/check-http.ts` | Offline signed HTTP integration scenarios and log sanitization checks. |
-| `scripts/seed-demo.ts` | Explicit fixture preparation command, separate from deployment. |
+| `scripts/seed-tickets.ts` / `scripts/lib/ticket-fixtures.ts` | Shared seed command and ready-made fixture loader for Portal and phone callers. |
+| `fixtures/tickets.json` | Two public demo ticket templates; no caller identity or credentials. |
+| `scripts/help.ts` / `scripts/lib/commands.ts` | Public npm command usage and shared descriptions. |
 | `src/faq.ts` | Verified catalogue of 12 public documentation topics with voice-length explanations. |
 | `src/mcp.ts` | Official SDK MCP endpoint with exactly three tools and no business resource access. |
 | `scripts/check-mcp.ts` / `scripts/check-mcp.test.ts` | Official client verification and sequential offline protocol checks. |
 | `config/telephony.ts` | Explicitly authorized phone constants for the assistant and technician. |
 | `config/tools.ts` | Desired definitions of the four shared native tools. |
-| `config/assistant.ts` / `config/workflow.ts` | Minimal assistant settings, approved text, and the validated four-node workflow. |
+| `config/assistant.ts` / `config/workflow.ts` | Assistant settings and the ticket follow-up workflow with context guards. |
 | `scripts/check-assistant.test.ts` | Offline graph, model preflight, and assistant create/update/reuse checks. |
 | `scripts/run-tests.ts` | Single full local test routine used by npm run test and deployment. |
 | `scripts/lib/` | Shared safe REST client, atomic state, and resource upsert adapters. |
@@ -268,24 +270,35 @@ fixture fields described above. Every fixture is validated by the actor before
 the batch is written. The endpoint requires the project administration secret
 and is never configured as an assistant tool.
 
-To prepare a real demo later, explicitly run these PowerShell commands:
+To prepare the Portal demo, run this after successful deployment:
 
 ```powershell
-Copy-Item -LiteralPath seed-demo.example.json -Destination seed-demo.local.json
-# Edit the local file: real Function HTTPS origin. The example uses web_call.
-# For phone_call only, add caller_phone privately with your test E.164 number.
-# Keep fixture operation ids stable. Choose dates appropriate for your demo.
-node --import tsx scripts/seed-demo.ts
+npm.cmd run seedticketsweb
 ```
 
-`seed-demo.local.json` is ignored by Git. The script loads the administration
-secret from `.env` or the shell only when run directly. It has a 10-second HTTP
-timeout, refuses redirects, and outputs counts or a sanitized HTTP status. It is
-not invoked by deployment and was not run against a public URL in this step.
-Replaying fixtures leaves their existing content, dates, and statuses unchanged.
-Web fixtures and all Portal smoke tests share the configured demo Actor, so a
-ticket created during one run can be retrieved during a later run. The local file
-must never supply web_demo_identity; it is configured only on the backend.
+For one phone caller, pass their international number:
+
+```powershell
+npm.cmd run --silent seedticketsphone -- "YOUR_CALLER_NUMBER_IN_E164"
+```
+
+Both commands use `scripts/seed-tickets.ts`, the same checked-in
+`fixtures/tickets.json`, and the same administration client. No file copying or
+URL editing is needed: the URL comes from ignored deployment state. The phone
+argument is required; only its international syntax is checked, not whether it
+belongs to an actual subscriber. A missing Actor is created normally by the
+backend. `--silent` avoids npm echoing the phone argument; application/backend
+logs never include it. The secret comes from `.env` or the shell, with a
+10-second timeout and no redirect/retry. Neither command runs during deployment.
+
+Relative fixture ages keep dates recent without manual edits. Stable operation
+ids mean replay leaves existing content, dates and statuses unchanged. Web
+fixtures and all Portal smoke tests share the configured demo Actor; each phone
+caller has their own Actor. No request supplies the backend web demo identity.
+
+Run `npm.cmd run help` for every public command with a short description and
+argument usage. The helper verifies its description registry against package
+scripts so new or renamed commands cannot silently disappear from help.
 
 ### Local verification and logs
 
@@ -581,7 +594,14 @@ includes `status_text` in each presented ticket: reference, spoken status label,
 and the stored progress summary. The model selects a ticket by number, reference
 or subject, asks for clarification when needed, and copies that exact text through
 the existing `SET_SUPPORT_VARIABLES` tool. Only then does the Speak node announce
-the status, followed by goodbye and hangup. No follow-up operation changes tickets.
+the status and goodbye in one Speak message, then routes directly to hangup.
+The status-preparation error uses the same closing pattern. Free conversation
+and cancellation keep the separate GOODBYE node. No follow-up operation changes tickets.
+
+This is a workaround for the observed consecutive-Speak audio problem: both
+messages appeared in the transcript, but only one playback completed before
+hangup and the farewell was not heard. The combined message needs a new Portal
+voice test after deployment; local graph tests cannot prove audio delivery.
 
 The orientation prompt has only the variable updater. Deterministic expression
 edges prioritize initialization failure, then an empty ticket list, then a filled

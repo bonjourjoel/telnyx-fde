@@ -4,6 +4,7 @@
 import { isSupportChannel, type SupportIdentityRequest } from "../../src/contracts";
 import { normalizePhoneE164 } from "../../src/security";
 import { HttpError, isObject } from "../../src/http/common";
+import type { DeploymentState } from "./deployment-state";
 
 // The URL is local tooling configuration; the backend still resolves identity.
 export interface AdminTarget { base: URL; identity: SupportIdentityRequest }
@@ -21,6 +22,12 @@ export function parseAdminTarget(config: unknown): AdminTarget {
   const phone = typeof config.caller_phone === "string" ? normalizePhoneE164(config.caller_phone) : null;
   if (!phone) throw new Error("invalid local phone identity");
   return { base, identity: { conversation_channel: "phone_call", caller_phone: phone } };
+}
+
+// Seed and reset commands share the recorded live origin; no URL file copying.
+export function adminTargetFromDeployment(state: Pick<DeploymentState, "func_url">, identity: SupportIdentityRequest): AdminTarget {
+  if (typeof state.func_url !== "string") throw new Error("deployment URL is missing");
+  return parseAdminTarget({ base_url: state.func_url, ...identity });
 }
 
 // Authenticate one fixed administration endpoint. No retries, redirects, account

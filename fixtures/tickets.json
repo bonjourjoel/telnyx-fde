@@ -1,0 +1,20 @@
+[
+  {
+    "subject": "Webhook signature troubleshooting",
+    "description": "Demo fixture about verifying callback signatures.",
+    "operation_id": "demo-webhook-signature-v1",
+    "status": "open",
+    "status_summary": "Awaiting handling.",
+    "created_days_ago": 3,
+    "updated_days_ago": 3
+  },
+  {
+    "subject": "Actor deployment investigation",
+    "description": "Demo fixture about deploying a Stateful Actor.",
+    "operation_id": "demo-actor-deployment-v1",
+    "status": "in_progress",
+    "status_summary": "A technician is investigating the deployment.",
+    "created_days_ago": 2,
+    "updated_days_ago": 1
+  }
+]

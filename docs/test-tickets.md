@@ -10,12 +10,10 @@ npm.cmd run resetactor
 Start a Portal voice test: the greeting should contain no ticket offer.
 Mute your microphone during the greeting, then enable it to speak.
 
-Prepare the two demo tickets once:
+Load the two ready-made demo tickets; no file setup is needed:
 
 ```powershell
-Copy-Item -LiteralPath seed-demo.example.json -Destination seed-demo.local.json
-# Set base_url to the deployed Function URL. Keep conversation_channel = web_call.
-node --import tsx scripts/seed-demo.ts
+npm.cmd run seedticketsweb
 ```
 
 Start another Portal test. Choose a ticket by number, reference, or subject.
@@ -37,3 +35,19 @@ npm.cmd run resetactor -- --phone
 
 Real inbound phone tests remain blocked by the account's SIP 486 / D61 restriction.
 Portal voice tests remain usable.
+
+To load the same tickets for a physical caller (an existing Actor is not required):
+
+```powershell
+npm.cmd run --silent seedticketsphone -- "YOUR_CALLER_NUMBER_IN_E164"
+```
+
+The number is required. `--silent` suppresses npm's argument banner. The scripts
+and backend never print it. The caller's operator/subscriber existence is not checked.
+Both seed commands reuse stable fixture ids, so repeating them adds no duplicates.
+
+Show every project command and its usage:
+
+```powershell
+npm.cmd run help
+```

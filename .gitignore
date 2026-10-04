@@ -5,6 +5,7 @@ node_modules
 .env
 deployment-state.json
 
-# Private demo configuration, including the test caller's number.
+# Keep any retired private seed config ignored; it may contain a caller number.
 seed-demo.local.json
+# Private target for the explicit phone reset command.
 reset-actor.local.json

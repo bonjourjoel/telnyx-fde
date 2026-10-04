@@ -1259,7 +1259,8 @@ Project root
 |
 +-- scripts/
 | +-- deploy.ts
-| +-- seed-demo.ts
+| +-- seed-tickets.ts
+| +-- help.ts
 | +-- check-mcp.ts
 |
 +-- docs/
@@ -1662,11 +1663,15 @@ Tasks:
    - Use the shared resolver, so web fixtures and Portal tests share an Actor.
    - Insert fixtures without overwriting existing tickets.
 
-8. Create seed-demo.ts.
-   The default example targets web_call and needs no phone number.
-   For phone_call fixtures, configure caller_phone privately in the ignored file.
-   The test number stays in local configuration excluded from
-   version control.
+8. Provide two explicit npm commands sharing scripts/seed-tickets.ts:
+   - seedticketsweb targets the backend Portal demo identity.
+   - seedticketsphone -- <E164_PHONE> requires one caller number argument.
+   - Load ready-made templates from fixtures/tickets.json; no copied local file.
+   - Read the Function URL from deployment state and use the shared admin client.
+   - An absent Actor is created normally. Never look up subscriber existence.
+   - Joel explicitly requested the phone argument; keep it out of Git and all
+     application/backend logs. Use npm --silent to suppress npm's argument banner.
+   - Relative ages generate current demo dates; fixed operation ids deduplicate.
 
 Validation:
 
@@ -2135,8 +2140,7 @@ Tasks:
    - Only then follow the transition.
 
 5. TICKET_STATUS:
-   - Speak {{selected_ticket_status_text}}.
-   - Then GOODBYE.
+   - Speak {{selected_ticket_status_text}} and the shared goodbye text together.
    - Then HANGUP.
 
 6. If no ticket is available:
@@ -2165,8 +2169,13 @@ Implementation for step 11:
   new-question conversation, cancellation or a status-preparation error. Failed
   initialization routes to an unavailable Speak message before conversation;
   successful initialization with no tickets routes directly to conversation.
-  The status Speak reads selected_ticket_status_text and continues to goodbye
-  and hangup. Ambiguous/out-of-range choices remain in the orientation prompt.
+  The status Speak reads selected_ticket_status_text plus the shared goodbye
+  in one message and continues directly to hangup. The status-error Speak also
+  includes the goodbye and goes directly to hangup. Other branches keep GOODBYE.
+  This avoids the observed two-Speak audio issue: the transcript included both
+  texts, but only one playback occurred before hangup, even with the mic off.
+  Live verification of the combined message is still required after deployment.
+  Ambiguous/out-of-range choices remain in the orientation prompt.
 - Expression guards use Telnyx's documented AST and keep their priority:
   init_ok=false, tickets_count=0, then nonempty selected_ticket_status_text.
   scripts/lib/assistant.ts preserves that per-source order in read-back checks;
@@ -2187,6 +2196,16 @@ Implementation for step 11:
   status formatting and updater/graph reconciliation. They do not run the hosted
   model or prove conversational selection. Joel performs the Portal smoke test
   after deployment; real physical calls remain blocked by the account's D61.
+
+- Seeding uses npm run seedticketsweb or npm run seedticketsphone -- <E164_PHONE>,
+  both calling the same seed-tickets.ts and scripts/lib/ticket-fixtures.ts routine.
+  Fixtures live in fixtures/tickets.json; no private seed config or example copy
+  is needed. Missing phone input fails; phone syntax is normalized, but subscriber
+  existence is not checked and an absent caller Actor is allowed. Old seed command
+  and public example files are retired; any old private config remains ignored.
+- npm run help reads package.json scripts and uses scripts/lib/commands.ts for
+  short English descriptions/usages. Local tests ensure every public npm script
+  has metadata. Help never loads secrets, deployment state or account resources.
 
 Validation:
 
