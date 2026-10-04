@@ -1,1 +1,25 @@
-﻿{"name": "telnyx-fde", "version": "0.1.0", "description": "Telnyx Edge StatefulActor function", "type": "module", "private": true, "scripts": {"typecheck": "tsc --noEmit", "deploy": "tsx scripts/deploy.ts"}, "dependencies": {"@telnyx/edge-runtime": "latest"}, "devDependencies": {"@types/node": "^18.0.0", "tsx": "^4.19.0", "typescript": "^5.0.0"}, "engines": {"node": ">=18.0.0"}}
+{
+  "name": "telnyx-fde",
+  "version": "0.1.0",
+  "description": "Telnyx Edge StatefulActor function",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "deploy": "tsx scripts/deploy.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.0",
+    "@telnyx/edge-runtime": "latest",
+    "zod": "4.2.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.0",
+    "@types/node": "^18.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

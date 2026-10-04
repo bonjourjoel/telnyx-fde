@@ -4,6 +4,7 @@
 import { STAGE, OUTCOME } from "./logging";
 import { verifyAdminSecret } from "./security";
 import { readSupportConfig } from "./support-config";
+import { handleMcpRequest } from "./mcp";
 import { handleInit } from "./http/init";
 import { handleCreateTicket } from "./http/create-ticket";
 import { handleSeed } from "./http/seed";
@@ -22,7 +23,8 @@ interface Route {
   handler: (req: Request, context: HttpContext) => Promise<Response>;
 }
 
-// Explicit route table. MCP and voice-entry are added only in later steps.
+// Fixed-method business routes. MCP is delegated separately to its SDK;
+// voice-entry remains a later step.
 const ROUTES: Record<string, Route> = {
   "/health": { method: "GET", stage: STAGE.HEALTH, operation: "health", handler: handleHealth },
   "/admin/check-config": { method: "GET", stage: STAGE.SECURITY, operation: "check_config", handler: handleCheckConfig },
@@ -35,6 +37,7 @@ const ROUTES: Record<string, Route> = {
 // loading .env or modifying process.env. Production uses the wrapper below.
 export async function routeRequest(req: Request, env: Env, secrets: RuntimeSecrets): Promise<Response> {
   const path = new URL(req.url).pathname;
+  if (path === "/mcp") return handleMcpRequest(req);
   const route = Object.hasOwn(ROUTES, path) ? ROUTES[path] : undefined;
   return runHttp(req, env, secrets, route?.stage ?? STAGE.SECURITY,
     route?.operation ?? "route_request", async (request, context) => {
@@ -51,7 +54,8 @@ export async function routeRequest(req: Request, env: Env, secrets: RuntimeSecre
 // Runtime fetch export preserves the scaffold convention and injected secrets.
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
-    return routeRequest(req, env, runtimeSecrets());
+    // Public MCP reads do not load runtime secret values.
+    return routeRequest(req, env, new URL(req.url).pathname === "/mcp" ? {} : runtimeSecrets());
   },
 };
 

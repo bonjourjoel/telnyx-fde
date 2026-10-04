@@ -22,6 +22,9 @@ A Telnyx Edge **StatefulActor** project, scaffolded with `telnyx-edge new-func -
 | `src/identity.ts` | Common phone/web actor identity resolution for initialization, creation, and fixtures. |
 | `scripts/check-http.ts` | Offline signed HTTP integration scenarios and log sanitization checks. |
 | `scripts/seed-demo.ts` | Explicit fixture preparation command, separate from deployment. |
+| `src/faq.ts` | Verified catalogue of 12 public documentation topics with voice-length explanations. |
+| `src/mcp.ts` | Official SDK MCP endpoint with exactly three tools and no business resource access. |
+| `scripts/check-mcp.ts` / `scripts/check-mcp.test.ts` | Official client verification and sequential offline protocol checks. |
 | `package.json` / `tsconfig.json` | TypeScript project configuration. |
 
 ## Deploy
@@ -117,6 +120,7 @@ method on a known path returns 405 with `Allow`. There is no Counter fallback.
 | `POST /init` | Telnyx at assistant startup | Telnyx Ed25519 | 200 `{ "dynamic_variables": { ... } }`. |
 | `POST /tickets/create` | Synchronous assistant webhook tool | Telnyx Ed25519 | 200 `{ "ticket_id": "...", "ticket_reference": "..." }` only after actor success. |
 | `POST /admin/seed` | Explicit demo preparation | `x-admin-secret` | 200 `{ "added_count": 2 }`; replays add zero existing fixtures. |
+| `/mcp` | MCP clients and, later, the assistant | Public catalogue; SDK Host/Origin checks | Streamable HTTP protocol; methods and error responses managed by the MCP SDK. |
 
 Both business callbacks verify `telnyx-signature-ed25519` and `telnyx-timestamp`
 against the exact raw bytes, before parsing JSON. The timestamp must be integer
@@ -295,3 +299,96 @@ Portal channel semantics were checked in
 [Conversation Keying](https://developers.telnyx.com/docs/inference/ai-assistants/conversation-keying).
 Web event-id deduplication follows the documented webhook envelope and duplicate
 handling guidance; native Portal session-id availability has not been established.
+
+## Documentation FAQ and MCP (step 7)
+
+The Function serves a public MCP catalogue at `/mcp`. The implementation uses
+`@modelcontextprotocol/server` 2.3.0 and Zod 4.2.0. The official client package
+2.3.0 is a development dependency for verification. Versions are recorded in
+`package-lock.json`; the project's Node requirement is now 24 or newer.
+
+`createMcpHandler` constructs a fresh `McpServer` from a factory for each request.
+Legacy requests use the SDK's stateless 2025 compatibility path. There is no
+session map or separate HTTP server, and no subscription stream is enabled.
+The router hands `/mcp` requests to the SDK without parsing their bodies first,
+including GET and DELETE. In stateless legacy mode those session methods return
+405 from the SDK. Modern protocol headers, initialization, notifications,
+discovery, and calls are handled by the SDK rather than custom REST endpoints.
+
+Exactly three tools are registered:
+
+| Tool | Parameters | Result |
+| --- | --- | --- |
+| `list_topics` | None | `topics`: id, title, and coverage for each entry. |
+| `read_short_answer` | `topic_id` from discovery | Topic id, exact documentation title, and source URL. The assistant should not read the URL aloud. |
+| `read_long_answer` | The same `topic_id` | Topic id and the unchanged authored explanation, 80 to 120 words. |
+
+Results include MCP text content and structured content. Unknown ids produce an
+explicit `isError` tool result, and invalid or extra parameters are rejected by
+the SDK's strict input schemas. No fallback answer is invented. This endpoint
+does not access KV, Actors, caller identity, or runtime secrets, and performs no
+documentation lookup over the network during a tool call.
+
+### Catalogue and sources
+
+The 12 page URLs and explanations were verified against official Telnyx
+documentation on 2026-10-04. Titles follow the pages; coverage lets the assistant
+distinguish general deployment from Actor execution or storage, for example.
+
+| Topic id | Documentation page |
+| --- | --- |
+| `dynamic-variables` | [Dynamic Variables](https://developers.telnyx.com/docs/inference/ai-assistants/dynamic-variables) |
+| `conversation-workflows` | [Conversation Workflows](https://developers.telnyx.com/docs/inference/ai-assistants/workflows) |
+| `tools-library` | [Tools Library](https://developers.telnyx.com/docs/inference/ai-assistants/tools-library) |
+| `preset-webhook-parameters` | [Preset Webhook Parameters](https://developers.telnyx.com/docs/inference/ai-assistants/preset-webhook-parameters) |
+| `kv` | [KV](https://developers.telnyx.com/docs/edge-compute/kv) |
+| `actor-execution` | [Execution Model](https://developers.telnyx.com/docs/edge-compute/stateful-actors/concepts/execution-model) |
+| `actor-storage` | [Actor Storage](https://developers.telnyx.com/docs/edge-compute/stateful-actors/api-reference/storage) |
+| `bindings` | [Bindings](https://developers.telnyx.com/docs/edge-compute/runtime/bindings) |
+| `secrets` | [Secrets](https://developers.telnyx.com/docs/edge-compute/configuration/secrets) |
+| `edge-quickstart` | [Quickstart](https://developers.telnyx.com/docs/edge-compute/quickstart) |
+| `logs` | [Logs](https://developers.telnyx.com/docs/edge-compute/observability/logs) |
+| `metrics` | [Metrics](https://developers.telnyx.com/docs/edge-compute/observability/metrics) |
+
+The catalogue validates its 10 to 15 entry budget, unique ids, official source
+hostnames, and word limits at module initialization. Returned discovery objects
+and topic records are detached copies. Changes to documentation require a reviewed
+catalogue update, not runtime browsing by the assistant.
+
+### MCP verification
+
+Default client checks use the real router in-process: no port, socket, account,
+credential, or .env file is needed. They discover the tools and read both answers
+for every topic sequentially, then verify unknown ids and invalid parameters.
+
+```powershell
+node --import tsx scripts/check-mcp.ts
+node --import tsx scripts/check-mcp.ts --legacy
+npm.cmd run typecheck
+node --import tsx --test --test-concurrency=1 scripts/check-caller-tickets.ts scripts/check-http.ts scripts/check-mcp.test.ts
+```
+
+The tests exercise modern negotiation and the 2025 initialization handshake,
+header guards, SDK method handling, malformed messages, the request body limit,
+and sanitized request/tool correlation logs. SDK responses are kept intact.
+Only recognized catalogue ids and fixed tool names reach tool logs; arguments,
+unknown ids, HTTP header values, and complete protocol messages do not.
+
+After a separately authorized deployment, run public verification explicitly:
+
+```powershell
+node --import tsx scripts/check-mcp.ts --url https://telnyx-fde-0768c5c4-b.telnyxcompute.com/mcp
+node --import tsx scripts/check-mcp.ts --legacy --url https://telnyx-fde-0768c5c4-b.telnyxcompute.com/mcp
+```
+
+The public URL above is the Function URL already returned by Telnyx; the updated
+MCP code has not been deployed or checked at that URL in this step. Its hostname
+and loopback hosts are allowlisted in `src/mcp.ts`. If hosting changes, update
+that list to the actual hostname. Server-to-server clients need no Origin header;
+present browser origins are rejected because no browser MCP caller is configured.
+
+Telnyx MCP registration remains step 8 and the phone/Portal workflow's FAQ branch
+remains step 12. Local protocol checks do not establish those integrations.
+The SDK integration follows its official
+[web-standard serving guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/serving/web-standard.md)
+and [client testing guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/testing.md).

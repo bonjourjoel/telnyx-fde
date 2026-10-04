@@ -735,7 +735,7 @@ Accept phone_call and web_call. A phone call uses the caller's normalized number
 A web_call uses only the demo identity configured by the backend in KV.
 Never derive a web identity from a fake phone number or a model-selected value.
 
-The FAQ is a small catalogue defined in the project.
+The FAQ is a catalogue of 10 to 15 verified Telnyx documentation topics.
 It provides three MCP tools:
 
 - list_topics
@@ -1166,7 +1166,7 @@ selects another demo Actor; ordinary deployment must not replace it.
 
 ## 4.5. FAQ and MCP tools
 
-The catalogue contains a few verified documentation topics.
+The catalogue contains 10 to 15 verified documentation topics.
 
 Each topic:
 
@@ -1655,9 +1655,11 @@ Serve the three documentation tools from /mcp.
 
 Tasks:
 
-1. Write faq.ts with a few genuinely documented topics.
+1. Write faq.ts with 10 to 15 genuinely documented Telnyx topics.
 2. Verify every URL and explanation.
 3. Install the official MCP TypeScript SDK.
+   The validated v2 packages are @modelcontextprotocol/server and
+   @modelcontextprotocol/client. Use Zod v4 for the registered input schemas.
 4. Use its stable release line and its transport compatible
    with Web standard Request/Response objects.
 
@@ -1672,6 +1674,8 @@ Tasks:
 6. Connect the MCP handler to /mcp.
 7. Use an implementation that does not require an in-memory session
    to persist between serverless invocations.
+   Use createMcpHandler with a fresh server factory and stateless legacy support.
+   Delegate all /mcp methods to the SDK and apply its HTTP header validation.
 
 8. Do not invent REST routes /mcp/tools/list and
    /mcp/tools/call instead of implementing the MCP protocol.
@@ -1691,6 +1695,8 @@ Validation:
 
 - A real MCP client discovers exactly the three tools.
 - Both reading tools use identifiers returned by list_topics.
+- The catalogue has 10 to 15 topics, each long answer contains 80 to 120 words.
+- Local SDK client checks cover modern and 2025 protocol requests sequentially.
 - The transport works at the public Edge URL.
 
 Documentation:
@@ -1700,7 +1706,7 @@ URL: https://github.com/modelcontextprotocol/typescript-sdk
 Purpose: official SDK, server/client packages, and examples.
 
 Title: Web Standard
-URL: https://ts.sdk.modelcontextprotocol.io/v2/serving/web-standard.html
+URL: https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/serving/web-standard.md
 Purpose: HTTP transport suitable for the Actor project's fetch handler.
 
 Title: MCP Server TypeScript, Telnyx example
