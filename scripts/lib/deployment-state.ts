@@ -26,6 +26,10 @@ export interface DeploymentState extends Record<string, unknown> {
   assistant_version_id?: string; assistant_default_texml_app_id?: string;
   assistant_creation_pending?: CreationCheckpoint;
   runtime_api_binding_id?: string;
+  phone_number_id?: string; texml_application_id?: string; outbound_voice_profile_id?: string;
+  texml_application_pending?: CreationCheckpoint;
+  // Legacy failed profile creation, retired after verified existing-profile reuse.
+  outbound_voice_profile_pending?: CreationCheckpoint;
 }
 export interface DeploymentStateStore {
   load(): Promise<DeploymentState>;
@@ -41,6 +45,11 @@ const StateSchema = z.object({
   assistant_id: z.string().min(1).optional(),
   assistant_creation_pending: CheckpointSchema.optional(),
   runtime_api_binding_id: z.uuid().optional(),
+  phone_number_id: z.string().min(1).optional(),
+  texml_application_id: z.string().min(1).optional(),
+  outbound_voice_profile_id: z.string().min(1).optional(),
+  texml_application_pending: CheckpointSchema.optional(),
+  outbound_voice_profile_pending: CheckpointSchema.optional(),
 }).passthrough();
 
 // Preserve future fields, while refusing malformed shared-tool tracking data.

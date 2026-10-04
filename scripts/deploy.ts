@@ -5,7 +5,7 @@
 // run repeatedly: it reuses identifiers stored in deployment-state.json and
 // never resets already-created state.
 //
-// Backend provisioning, MCP/shared tools, and the minimal assistant from step 9:
+// Backend, MCP/shared tools, minimal assistant, and phone routing through step 10:
 //   Preflight: typecheck, then the shared full local test suite, before .env.
 //   Runtime credential: validate the org SDK binding; renew only confirmed
 //   invalid/expired tokens on that same resource before storage/secrets/ship.
@@ -40,7 +40,9 @@
 //  15. Upsert the existing HTTP MCP connection and four shared tools, checkpoint
 //      every id immediately, and verify their definitions and uniqueness.
 //  16. Upsert the assistant and complete minimal workflow using existing ids.
-//  17. Save final deployment metadata and print ids/URLs only.
+//  17. Store TeXML, reuse the existing profile, upsert phone routing, assign the
+//      purchased number and read back references without placing a call.
+//  18. Save final deployment metadata and print ids/URLs only.
 //
 // All errors are surfaced explicitly. A 401/403/5xx during namespace lookup
 // is treated as an error, never as "resource absent", to avoid accidentally
@@ -61,7 +63,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { prepareSupportConfig, SUPPORT_CONFIG_KEY } from "../src/support-config";
 import { buildSharedTools, validateTelephony } from "../config/tools";
-import { TELNYX_PHONE_NUMBER, TECHNICIAN_PHONE_NUMBER } from "../config/telephony";
+import { TELNYX_PHONE_NUMBER, TECHNICIAN_PHONE_NUMBER, buildPhoneRoutingConfig } from "../config/telephony";
 import { createTelnyxApi, readApiJson, sanitizeDiagnostic, TelnyxApiError, type TelnyxApi } from "./lib/telnyx-api";
 import { createDeploymentStateStore, type DeploymentState } from "./lib/deployment-state";
 import { ensureMcpRegistration } from "./lib/mcp-registration";
@@ -70,6 +72,7 @@ import { buildAssistant, ASSISTANT_MODEL, FAQ_TOOL_NAMES } from "../config/assis
 import { assertAssistantModelAvailable, upsertAssistant } from "./lib/assistant";
 import { runLocalTests } from "./run-tests";
 import { ensureRuntimeBinding } from "./lib/runtime-binding";
+import { syncPhoneRouting } from "./lib/phone-routing";
 
 const execFileAsync = promisify(execFile);
 
@@ -739,7 +742,7 @@ async function probeCheckConfig(funcUrl: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  console.log("=== telnyx-fde deploy (through step 9) ===");
+  console.log("=== telnyx-fde deploy (through step 10) ===");
 
   // Fail locally before loading credentials or provisioning any account resource.
   await checkTypeScript();
@@ -851,12 +854,18 @@ async function main(): Promise<void> {
   const sharedTools = await syncSharedTools(getRestApi(), stateStore, tools);
   for (const tool of sharedTools) console.log(JSON.stringify({ operation: "shared_tool_upsert", ...tool }));
 
-  // 16. Minimal assistant only. Number assignment and TeXML routing are step 10.
+  // 16. Keep the approved minimal assistant and Portal test configuration.
   const hangupId = sharedTools.find((tool) => tool.tool === "HANGUP")?.id;
   if (!hangupId) throw new TelnyxApiError("missing_hangup_tool_id");
   const assistant = await upsertAssistant(getRestApi(), stateStore,
     buildAssistant(funcUrl, state.func_name, mcp.server.id, hangupId));
   console.log(JSON.stringify({ operation: "assistant_upsert", action: assistant.action, id: assistant.resource.id }));
+
+  // 17. Route the physical number with shared checkpoints and verification.
+  // This never starts a call or modifies the caller identity resolver.
+  const phoneRoutingConfig = buildPhoneRoutingConfig(funcUrl, state.func_name);
+  const phoneRouting = await syncPhoneRouting(getRestApi(), stateStore, phoneRoutingConfig);
+  console.log(JSON.stringify({ operation: "phone_routing_upsert", ...phoneRouting }));
 
   // Reload the helpers' durable state before adding final deployment metadata.
   state = await stateStore.load();
@@ -865,7 +874,7 @@ async function main(): Promise<void> {
   await stateStore.save(state);
   console.log(`Saved ${STATE_FILE}.`);
 
-  // 17. Summary.
+  // 18. Summary. Phone values remain in configuration, not logs.
   console.log("");
   console.log("=== Deployment summary ===");
   console.log(`Function URL : ${funcUrl}`);
@@ -875,6 +884,10 @@ async function main(): Promise<void> {
   console.log(`Shared tools : ${sharedTools.length} verified (identifiers saved).`);
   console.log(`Assistant id : ${state.assistant_id}.`);
   console.log("Workflow     : GREETING -> CONVERSATION -> GOODBYE -> HANGUP.");
+  console.log(`Voice entry  : ${new URL("/voice-entry", funcUrl).href}`);
+  console.log(`Phone id     : ${state.phone_number_id} (number in config/telephony.ts).`);
+  console.log(`TeXML app id : ${state.texml_application_id}.`);
+  console.log(`Voice profile: ${state.outbound_voice_profile_id} (required destinations: ${phoneRoutingConfig.required_outbound_countries.join(", ")}).`);
   console.log(
     `Secrets      : ${state.secrets_configured.join(", ")} (values never displayed).`,
   );

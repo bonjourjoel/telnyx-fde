@@ -489,8 +489,9 @@ Assistant list entries were observed with empty MCP/tools and a null flow even
 when GET by id returned the correct configuration. The list therefore never
 drives the update decision. GET-only resolved shared tools are never copied
 back into request bodies. The
-platform's automatically created default TeXML application id is saved, but phone
-number assignment and routing remain step 10. No tickets or fixtures are changed.
+platform's automatically created default TeXML application id is saved. Step 10
+below adds a separate application for the physical number. No tickets or fixtures
+are changed by deployment.
 
 Local verification:
 
@@ -507,14 +508,71 @@ Deployment runs typecheck first, then all tests sequentially, before loading
 These checks use synthetic API responses and state. Joel's two step 9 deployments
 confirmed API acceptance and the same assistant id. The corrected comparison was
 also run twice against the real assistant using GET only: both returned reused,
-with no API or local state writes. Use the Portal voice test to check one greeting,
-conversation, goodbye and hangup; this voice smoke test remains pending.
+with no API or local state writes. Joel's Portal voice test on 2026-10-04 at 17:54
+Europe/Paris succeeded with the microphone muted during the greeting. Server logs
+confirmed KV and Actor reads, /init HTTP 200 in 1358 ms, the complete greeting,
+conversation, goodbye and hangup. Request id: 769c0fef-c80c-4b18-a294-69a8ad955473.
 
 Contracts follow the official [workflow guide](https://developers.telnyx.com/docs/inference/ai-assistants/workflows),
 [Create Assistant](https://developers.telnyx.com/api-reference/assistants/create-an-assistant),
 [Update Assistant](https://developers.telnyx.com/api-reference/assistants/update-an-assistant),
 [List Assistants](https://developers.telnyx.com/api-reference/assistants/list-assistants),
 and [voice model documentation](https://developers.telnyx.com/docs/voice/conversational-ai/quickstart).
+
+## Physical phone routing (step 10)
+
+Deployment now fetches the assistant's TeXML JSON string, checks the assistant id,
+and stores it as a JSON string under `voice/texml` in the existing KV namespace.
+Public `POST /voice-entry` returns that document with `application/xml`. It ignores
+the form-encoded caller fields and performs no Actor or support business operation.
+Missing, unsupported or unreadable XML returns 503. Signed `/init` and ticket
+callbacks retain their existing verification and shared identity resolver.
+
+`config/telephony.ts` supplies the purchased number and stable routing names.
+`scripts/lib/phone-routing.ts` fully lists and reads the existing number, checks
+its active voice settings, upserts `telnyx-fde-voice`, and assigns its connection id
+with PATCH. It never orders a number or places a call. The deployed instruction
+route is checked before assignment. Unrelated number connections, forwarding,
+denied reads and duplicate resources stop with explicit diagnostics.
+
+The account allows only one outbound profile. The script reuses the existing
+profile referenced by the assistant's automatic TeXML application, currently
+`Default`. It preserves US, CA and every existing destination and adds FR for the
+future technician transfer. The physical phone application shares that profile
+with the Portal. Its name, billing, limits, recording and other policies are
+preserved and checked by read-back. The automatic Portal application is unchanged.
+A missing, disabled or conflicting profile stops deployment; no profile POST is
+ever issued. A real transfer remains step 14 verification.
+
+The common upsert/state helpers checkpoint application creation. The existing
+profile id is saved and an obsolete failed-profile-creation checkpoint is removed
+only after successful inventory and read-back checks. Repeated deployment reuses
+the ids and skips unchanged profile, XML and number-assignment writes. Only ids and
+creation checkpoints are stored locally; phones and XML are not logged or copied
+into deployment state. Phone callers keep their number HMAC Actor; Portal tests
+keep the stable configured demo Actor. Neither identity scheme changes here.
+
+Deploy and test yourself:
+
+```powershell
+npm.cmd run deploy
+```
+
+After success, call the purchased number in `config/telephony.ts`. Check the full
+greeting, ask one simple question, then ask the assistant to hang up. Verify
+`voice_entry`, `/init`, KV/Actor reads and the conversation's goodbye/hangup.
+Repeat the Portal test to check both entry modes. Re-run deploy to verify reused
+application/profile/number ids. Local checks use the same `npm.cmd run test` suite
+as deployment. The first step 10 deployment shipped the backend but failed because
+creating a second outbound profile exceeded the account limit (HTTP 403, code
+10039). The corrected routing still needs deployment and a real phone call.
+
+Contracts follow [Get Assistant TeXML](https://developers.telnyx.com/api-reference/assistants/get-assistant-texml),
+[TeXML Instruction Fetching](https://developers.telnyx.com/docs/voice/programmable-voice/texml-instruction-fetching),
+[Create TeXML Application](https://developers.telnyx.com/api-reference/texml-applications/creates-a-texml-application),
+[Update Phone Number](https://developers.telnyx.com/api-reference/phone-number-configurations/update-a-phone-number),
+[Update Outbound Profile](https://developers.telnyx.com/api-reference/outbound-voice-profiles/updates-an-existing-outbound-voice-profile),
+and the [official OpenAPI schemas](https://github.com/team-telnyx/openapi/blob/master/openapi/spec3.json).
 
 ## KV failure diagnosis
 

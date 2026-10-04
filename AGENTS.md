@@ -70,6 +70,7 @@ type -a node npm
 
 questions (maybe)
 
+- Trial account: inbound calls with real phone blocked (SIP 486 / D61); "Add service address" disabled. Upgrade request already sent to Stephen.
 - Stateful Actors have no expiration. How do we avoid memory leaks, other than using a makeshift system? What about KV, with expiration?
 - Do you write unit tests for POCs, or do you consider that outside the scope of this exercise?
 - Project isolation through workspaces or managed accounts? Or should we skip it?
@@ -1959,7 +1960,11 @@ Implementation for step 9:
 - Joel's two real step 9 deployments confirmed creation/read-back and stable ids.
   After the comparison fix, two GET-only checks against the real assistant both
   returned reused with the same id. No API or local state writes were performed.
-  The Portal voice smoke test remains to be verified by Joel.
+  Joel's Portal voice smoke test at 17:54 Europe/Paris on 2026-10-04 succeeded
+  with the microphone muted during the greeting. Logs confirmed KV and Actor
+  reads, /init HTTP 200 in 1358 ms, full greeting, conversation, goodbye and
+  hangup. Request id: 769c0fef-c80c-4b18-a294-69a8ad955473. Audio feedback remains
+  a likely interruption cause; it was not independently proven by server logs.
 
 Validation:
 
@@ -2025,6 +2030,52 @@ Tasks:
 
 TeXML routing only starts the assistant.
 Support logic remains in the Conversation Workflow.
+
+Implementation for step 10:
+
+- config/telephony.ts retains the purchased and technician number constants and
+  builds a stable application name and required outbound country permissions.
+  No phone values enter logs or state.
+- src/voice-texml.ts accepts only the observed Connect/AIAssistant startup XML,
+  with an explicit size bound and no additional verbs, attributes or entities.
+  GET /v2/ai/assistants/{id}/texml returned a JSON string in the real read-only
+  study. Validate its assistant id before storing it as a JSON string in KV.
+- Public POST /voice-entry reads only voice/texml and returns application/xml;
+  missing/invalid instructions or KV errors return 503. The form-encoded request
+  body is unused. It does not resolve identity, access tickets, or start a call
+  by itself. Signed /init and /tickets/create keep their verification unchanged.
+- scripts/lib/phone-routing.ts reuses the common API, state and resource upsert
+  routines. Fully list/read the purchased number, verify active voice settings,
+  refuse foreign connections/forwarding, and save only its id. Never buy another
+  number. Upsert the owned TeXML application, then PATCH only connection_id and
+  verify it by GET. Probe the deployed instruction URL before number assignment.
+- The real number was active and unassigned in the read-only study. The first
+  deployment shipped the backend but profile POST failed with HTTP 403/code 10039:
+  this account allows only one outbound profile. Never create another profile.
+  scripts/lib/outbound-profile.ts reads the automatic assistant application's
+  existing profile reference, fully lists profiles, and validates that id.
+  Reuse Default, preserve every current destination and add the required country
+  (FR initially) by PATCH. Send only its unchanged name and the merged country
+  list; verify that billing, limits, recording and all other policy fields remain
+  unchanged. Missing, disabled, duplicate or conflicting resources stop. The
+  physical number application shares the same profile; never modify the automatic
+  Portal application. Real transfer verification remains step 14.
+- Keep phone_number_id, texml_application_id, outbound_voice_profile_id and
+  creation checkpoints in ignored deployment-state.json. Reconcile partial or
+  lost responses without another resource creation. GET failures never mean
+  absence. Update the owned application by PATCH. Only extend permissions on the
+  existing shared profile; never rename it or reset its other policies. Remove a
+  legacy failed profile-creation checkpoint only after verified reuse, and stop
+  if an actual old project profile exists rather than silently orphaning it.
+- deploy.ts calls this module after assistant upsert. It still uses the same
+  complete local test routine; check-phone-routing.test.ts adds offline routing,
+  rerun, partial-failure, XML serving and Portal-preservation scenarios.
+- CallerTickets remains one Actor class, with a phone HMAC instance per real
+  caller and one stable backend demo identity for Portal calls. Initialization,
+  creation and fixtures continue using the same resolver within each mode.
+- Joel runs deploy and the real phone/Portal tests. Step 10 implementation and
+  local checks do not prove live routing; no deployment or phone call is executed
+  automatically by the coding agent. Do not modify the human debugging file.
 
 Validation:
 

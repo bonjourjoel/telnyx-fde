@@ -9,6 +9,7 @@ import { handleMcpRequest } from "./mcp";
 import { handleInit } from "./http/init";
 import { handleCreateTicket } from "./http/create-ticket";
 import { handleSeed } from "./http/seed";
+import { handleVoiceEntry } from "./http/voice-entry";
 import { runHttp, runtimeSecrets, observe, type HttpContext, type RuntimeSecrets } from "./http/common";
 
 // The exported names match the manifest's actor types. Counter remains deployed
@@ -24,14 +25,15 @@ interface Route {
   handler: (req: Request, context: HttpContext) => Promise<Response>;
 }
 
-// Fixed-method business routes. MCP is delegated separately to its SDK;
-// voice-entry remains a later step.
+// Fixed-method routes. MCP is delegated separately to its SDK; public voice
+// startup instructions leave identity to the signed initialization callback.
 const ROUTES: Record<string, Route> = {
   "/health": { method: "GET", stage: STAGE.HEALTH, operation: "health", handler: handleHealth },
   "/admin/check-config": { method: "GET", stage: STAGE.SECURITY, operation: "check_config", handler: handleCheckConfig },
   "/init": { method: "POST", stage: STAGE.INIT, operation: "initialize", handler: handleInit },
   "/tickets/create": { method: "POST", stage: STAGE.CREATE_TICKET, operation: "create_ticket", handler: handleCreateTicket },
   "/admin/seed": { method: "POST", stage: STAGE.ADMIN_SEED, operation: "seed_demo", handler: handleSeed },
+  "/voice-entry": { method: "POST", stage: STAGE.VOICE_ENTRY, operation: "voice_entry", handler: handleVoiceEntry },
 };
 
 // Testable routing seam: local checks inject synthetic secrets instead of
