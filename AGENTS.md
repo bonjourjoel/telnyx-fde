@@ -42,6 +42,8 @@ You must code cleanly as expected in the challenge: DRY, SOLID, modular, logic, 
 
 Never code unless I tell you to code. Never execute a commande before I tell you to execute a command. When I agree, i say the keyword "GO". Don't code or execute anything without the keyword authorization. Each "GO" applies only to the task we have just agreed on. It does not authorize subsequent tasks. Without that authorization, explain what you propose and wait.
 
+MANDATORY comments: I want comments in english at the begining of each file, to say briefly what it does. And comments above functions, objects, types. I also want regular comments in the code itself. I want enough comments to be able to understand the app without reading the code.
+
 </project_instructions>
 
 ==========================
