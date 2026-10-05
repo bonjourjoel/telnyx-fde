@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { buildAssistant, ASSISTANT_MODEL, ASSISTANT_INSTRUCTIONS, INIT_WEBHOOK_TIMEOUT_MS } from "../config/assistant";
 import { buildSupportWorkflow, validateConversationFlow, ORIENTATION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION, type ConversationFlow } from "../config/workflow";
 import { FAQ_SHORT_PROMPT } from "../config/faq-prompts";
-import { TICKET_INTAKE_PROMPT, TICKET_CONFIRM_PROMPT } from "../config/ticket-prompts";
+import { TICKET_INTAKE_PROMPT } from "../config/ticket-prompts";
 import { buildSharedTools } from "../config/tools";
 import { DEFAULT_INIT_DYNAMIC_VARIABLES, WRITABLE_DYNAMIC_VARIABLE_KEYS, CREATED_TICKET_VARIABLE_KEYS } from "../src/contracts";
 import { assertAssistantModelAvailable, upsertAssistant } from "./lib/assistant";
@@ -122,7 +122,7 @@ test("support assistant keeps ticket context and scopes model tools for MCP FAQ"
   for (const key of [...WRITABLE_DYNAMIC_VARIABLE_KEYS, ...CREATED_TICKET_VARIABLE_KEYS]) assert.equal(DEFINITION.dynamic_variables[key], "");
   assert.deepEqual(DEFINITION.enabled_features, ["telephony"]);
   assert.deepEqual(DEFINITION.mcp_servers, [{ id: "mcp-example", allowed_tools: ["list_topics", "read_short_answer", "read_long_answer"] }]);
-  assert.equal(DEFINITION.conversation_flow.nodes.length, 16);
+  assert.equal(DEFINITION.conversation_flow.nodes.length, 15);
   const prompt = DEFINITION.conversation_flow.nodes.find((node) => node.type === "prompt" && node.id === "faq_short")!;
   assert.ok(prompt.type === "prompt");
   assert.equal(prompt.instructions, FAQ_SHORT_PROMPT);
@@ -188,25 +188,32 @@ test("context and status guards prevent empty or failed-context status delivery"
   }
 });
 
-// The immutable capability is checked before both collection and final consent;
-// missing fields return to intake without automatically creating a ticket.
-test("ticket preparation guards fail closed and preserve correction/cancellation paths", () => {
-  for (const source of ["ticket_intake", "ticket_confirm"]) {
-    for (const capability of [false, undefined, null, "true", 1]) {
-      assert.equal(expressionTarget(source, { can_create_ticket: capability,
-        ticket_subject: "Subject", ticket_description: "Description" }), "ticket_unavailable");
-    }
+// The immutable capability is checked before the single offer; filled fields
+// alone never authorize creation without explicit agreement and storage.
+test("ticket preparation guards fail closed and preserve cancellation paths", () => {
+  for (const capability of [false, undefined, null, "true", 1]) {
+    assert.equal(expressionTarget("ticket_intake", { can_create_ticket: capability,
+      ticket_subject: "Subject", ticket_description: "Description" }), "ticket_unavailable");
   }
-  assert.equal(expressionTarget("ticket_confirm", { can_create_ticket: true, ticket_subject: "", ticket_description: "Description" }), "ticket_intake");
-  assert.equal(expressionTarget("ticket_confirm", { can_create_ticket: true, ticket_subject: "Subject", ticket_description: "" }), "ticket_intake");
-  assert.equal(expressionTarget("ticket_confirm", { can_create_ticket: true, ticket_subject: "Subject", ticket_description: "Description" }), undefined);
+  // No automatic field-readiness transition: filled fields alone do not route.
+  assert.equal(expressionTarget("ticket_intake", { can_create_ticket: true, ticket_subject: "Subject", ticket_description: "Description" }), undefined);
 
   const flow = DEFINITION.conversation_flow;
+  // Exactly one edge targets create_ticket, an LLM condition from ticket_intake.
   const entry = flow.edges.filter(edge => edge.target.node_id === "create_ticket");
-  assert.equal(entry.length, 1); assert.equal(entry[0].start_node_id, "ticket_confirm");
-  assert.ok(entry[0].condition.type === "llm"); assert.match(entry[0].condition.prompt, /explicitly agreed to that final confirmation/);
-  const paths = { ticket_intake_cancel: "goodbye", ticket_intake_failed: "ticket_error",
-    ticket_confirm_cancel: "goodbye", ticket_confirm_correct: "ticket_intake" };
+  assert.equal(entry.length, 1); assert.equal(entry[0].start_node_id, "ticket_intake");
+  assert.ok(entry[0].condition.type === "llm");
+  assert.match(entry[0].condition.prompt, /explicitly agreed to that question/);
+  assert.match(entry[0].condition.prompt, /SET_SUPPORT_VARIABLES call successfully stored both/);
+  assert.match(entry[0].condition.prompt, /already-filled variables do not authorize creation/);
+  // No confirmation node or its edges survive.
+  assert.ok(!flow.nodes.some(node => node.id === "ticket_confirm"));
+  assert.ok(!flow.edges.some(edge => edge.id.startsWith("ticket_confirm_")));
+  // No return-to-intake edges except resolution_to_intake.
+  const backToIntake = flow.edges.filter(edge => edge.target.node_id === "ticket_intake").map(edge => edge.id).sort();
+  assert.deepEqual(backToIntake, ["resolution_to_intake"]);
+  // Capability, error and cancel transitions remain.
+  const paths = { ticket_intake_cancel: "goodbye", ticket_intake_failed: "ticket_error" };
   for (const [id, target] of Object.entries(paths)) assert.equal(flow.edges.find(edge => edge.id === id)!.target.node_id, target);
 });
 
@@ -235,11 +242,9 @@ test("creation result needs HTTP string 200 plus id and reference without automa
 test("ticket tools remain scoped and bind exact business variables", () => {
   const flow = DEFINITION.conversation_flow;
   const intake = flow.nodes.find(node => node.id === "ticket_intake")!;
-  const confirm = flow.nodes.find(node => node.id === "ticket_confirm")!;
-  assert.ok(intake.type === "prompt" && confirm.type === "prompt");
-  assert.equal(intake.instructions, TICKET_INTAKE_PROMPT); assert.equal(confirm.instructions, TICKET_CONFIRM_PROMPT);
+  assert.ok(intake.type === "prompt");
+  assert.equal(intake.instructions, TICKET_INTAKE_PROMPT);
   assert.equal(intake.tools_mode, "replace"); assert.deepEqual(intake.shared_tool_ids, [TOOL_IDS.set_support_variables]);
-  assert.equal(confirm.tools_mode, "replace"); assert.deepEqual(confirm.shared_tool_ids, []);
   for (const node of flow.nodes) if (node.type === "prompt") {
     assert.ok(!node.shared_tool_ids.includes(TOOL_IDS.create_ticket));
     assert.ok(!node.shared_tool_ids.includes(TOOL_IDS.hangup));
@@ -251,10 +256,8 @@ test("ticket tools remain scoped and bind exact business variables", () => {
   assert.deepEqual(parameters.required, ["ticket_subject", "ticket_description"]);
   for (const key of parameters.required) assert.equal(DEFINITION.dynamic_variables[key], "");
   assert.equal(webhook.async, false);
-  for (const node of [intake, confirm]) {
-    const routes = [...node.instructions.matchAll(/transition__([a-z_]+)/g)].map(match => match[1]);
-    assert.deepEqual(routes.sort(), flow.edges.filter(edge => edge.start_node_id === node.id && edge.condition.type === "llm").map(edge => edge.id).sort());
-  }
+  const routes = [...intake.instructions.matchAll(/transition__([a-z_]+)/g)].map(match => match[1]);
+  assert.deepEqual(routes.sort(), flow.edges.filter(edge => edge.start_node_id === intake.id && edge.condition.type === "llm").map(edge => edge.id).sort());
 });
 
 // A successful title lookup closes through the existing goodbye Speak. There
@@ -371,6 +374,45 @@ test("ticket creation readback drift is repaired on the same assistant", async (
   assert.equal(store.state.shared_tool_ids!.CREATE_TICKET, TOOL_IDS.create_ticket);
   assert.equal(api.items.size, 1);
   assert.equal(api.calls.filter(call => call.method === "POST" && call.path === "/ai/assistants").length, 1);
+});
+
+// A deployed assistant still carrying the removed confirmation branch is
+// reconciled by a complete graph update on the same id, not a new creation.
+// This proves the migration from the two-step collection/confirmation flow to
+// the approved single-offer flow without orphaning the existing assistant.
+test("removed confirmation branch is reconciled on the same assistant", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  const resource = api.items.get(first.resource.id)!;
+  // Simulate the previously deployed graph with the confirmation prompt node
+  // and the legacy edges that routed intake into it and out to creation.
+  const stored = resource.conversation_flow as { nodes: Record<string, unknown>[]; edges: Record<string, unknown>[] };
+  stored.nodes.push({
+    type: "prompt", id: "ticket_confirm", name: "TICKET_CONFIRM",
+    instructions: "Legacy confirmation.", instructions_mode: "append",
+    shared_tool_ids: [], tools_mode: "replace", position: { x: 1500, y: 360 },
+    tools: [], model: null, external_llm: null,
+  });
+  stored.edges.push(
+    { id: "ticket_intake_to_confirm", start_node_id: "ticket_intake",
+      target: { type: "node", node_id: "ticket_confirm" }, condition: { type: "llm", prompt: "Legacy." } },
+    { id: "ticket_confirm_create", start_node_id: "ticket_confirm",
+      target: { type: "node", node_id: "create_ticket" }, condition: { type: "llm", prompt: "Legacy." } },
+    { id: "ticket_confirm_correct", start_node_id: "ticket_confirm",
+      target: { type: "node", node_id: "ticket_intake" }, condition: { type: "llm", prompt: "Legacy." } },
+  );
+  const second = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(second.action, "updated");
+  assert.equal(second.resource.id, first.resource.id);
+  assert.equal(api.items.size, 1);
+  assert.equal(api.calls.filter(call => call.method === "POST" && call.path === "/ai/assistants").length, 1);
+  const reconciled = api.items.get(first.resource.id)!.conversation_flow as typeof DEFINITION.conversation_flow;
+  assert.ok(!reconciled.nodes.some(node => node.id === "ticket_confirm"));
+  assert.ok(!reconciled.edges.some(edge => edge.id === "ticket_intake_to_confirm"));
+  assert.ok(!reconciled.edges.some(edge => edge.id === "ticket_confirm_create"));
+  assert.ok(!reconciled.edges.some(edge => edge.id === "ticket_confirm_correct"));
+  assert.ok(reconciled.nodes.some(node => node.id === "ticket_intake"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "ticket_intake_create"));
 });
 
 // A discovered id must also be hydrated, even when no id survived locally.

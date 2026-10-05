@@ -31,7 +31,7 @@ A Telnyx Edge **StatefulActor** project, scaffolded with `telnyx-edge new-func -
 | `config/tools.ts` | Desired definitions of the four shared native tools. |
 | `config/assistant.ts` / `config/workflow.ts` | Assistant settings and ticket/FAQ workflow with context guards. |
 | `config/faq-prompts.ts` | Approved structured FAQ prompts and scripted fallback text. |
-| `config/ticket-prompts.ts` | Approved ticket collection/confirmation prompts and short result messages. |
+| `config/ticket-prompts.ts` | Approved single-offer ticket intake prompt and short result messages. |
 | `scripts/check-assistant.test.ts` | Offline graph, model preflight, and assistant create/update/reuse checks. |
 | `scripts/run-tests.ts` | Single full local test routine used by npm run test and deployment. |
 | `scripts/lib/` | Shared safe REST client, atomic state, and resource upsert adapters. |
@@ -669,22 +669,30 @@ After deployment, follow [test-faq.md](docs/test-faq.md) for Portal validation o
 the two voice tool calls, spoken title, goodbye and hangup. Deployment and this live
 FAQ smoke test remain to be run by Joel. FAQ reads do not change Actor records.
 
-## Confirmed ticket creation (step 13)
+## Ticket creation (step 13)
 
-An uncovered question leads to the approved ticket offer and collection in
-`TICKET_INTAKE`. This Prompt exposes only SET_SUPPORT_VARIABLES, stores both
-`ticket_subject` and `ticket_description`, and waits for successful storage before
-`TICKET_CONFIRM`. The confirmation Prompt exposes no native tools or MCP. It
-briefly restates the request and asks "Should I create this ticket?". Only the
-caller agreeing to that final question can select the creation transition.
-Corrections return to intake; cancellations use the existing goodbye/hangup path.
+An uncovered question leads to the approved single ticket offer in
+`TICKET_INTAKE`. This Prompt exposes only SET_SUPPORT_VARIABLES. It briefly
+summarizes the caller's request, then asks "Would you like me to create a support
+ticket?". If the caller explicitly agrees, it calls SET_SUPPORT_VARIABLES with a
+short `ticket_subject` and a faithful `ticket_description` based on the request,
+waits for successful storage, and calls the creation transition. If the update
+fails it routes to the error Speak; if the caller declines, cancels, or asks to
+finish, it routes to goodbye. There is no separate confirmation node, collection
+loop, or correction branch.
 
-Both preparation nodes require `can_create_ticket` to be the boolean true. Missing
-confirmation fields return to intake. CREATE_TICKET is a standalone Tool node
-using the existing library id, never a model-visible native tool. Telnyx fills its
-two business arguments from identically named variables. The existing synchronous
-webhook preserves its channel/caller/operation presets and response mappings.
-Signatures, phone/Portal identity resolution and Actor idempotence are unchanged.
+`TICKET_INTAKE` requires `can_create_ticket` to be the boolean true. CREATE_TICKET
+is a standalone Tool node using the existing library id, never a model-visible
+native tool. Telnyx fills its two business arguments from identically named
+variables. The existing synchronous webhook preserves its channel/caller/operation
+presets and response mappings. Signatures, phone/Portal identity resolution and
+Actor idempotence are unchanged.
+
+The single LLM creation transition requires that the assistant summarized the
+request, asked the ticket creation question, the caller explicitly agreed to that
+question, and the subsequent SET_SUPPORT_VARIABLES call successfully stored both
+fields. Silence, ambiguity, or merely already-filled variables do not authorize
+creation.
 
 The success edge uses the documented `bool_op` AND form: voice HTTP status string
 `"200"`, nonempty `created_ticket_id`, and nonempty `created_ticket_reference`.
@@ -696,12 +704,14 @@ unavailability each use one short Speak containing goodbye, then default HANGUP.
 Deployment reuses the existing shared tool and assistant, replacing the complete
 graph. It never creates tickets, loads fixtures, resets Actors, changes caller
 HMAC/demo identity or toggles the technician flag. No transfer is offered yet.
-Local tests check the typed guards, correction/cancellation routes, scoped tools,
-business argument names, result fallback and readback drift. They do not run the
-hosted model or prove voice timing/callback behavior. Follow
-[test-ticket-creation.md](docs/test-ticket-creation.md) after deployment to verify
-real confirmation, cancellation, correction, callback mappings and next-call
-retrieval on the stable Portal demo Actor.
+Local tests check the capability guard, the single LLM creation entry from intake,
+the absence of a confirmation node and return-to-intake edges, scoped tools,
+business argument names, the typed result fallback, readback drift, and an offline
+reconciliation test that updates an existing assistant still carrying the removed
+confirmation branch. They do not run the hosted model or prove voice
+timing/callback behavior. Follow [test-ticket-creation.md](docs/test-ticket-creation.md)
+after deployment to verify the real single offer, decline, callback mappings and
+next-call retrieval on the stable Portal demo Actor.
 
 ## KV failure diagnosis
 

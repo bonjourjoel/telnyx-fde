@@ -9,7 +9,7 @@ import {
 } from "../src/contracts";
 import { FAQ_SHORT_PROMPT, RESOLUTION_MESSAGE, FAQ_ERROR_MESSAGE } from "./faq-prompts";
 import {
-  TICKET_INTAKE_PROMPT, TICKET_CONFIRM_PROMPT, TICKET_CREATED_MESSAGE,
+  TICKET_INTAKE_PROMPT, TICKET_CREATED_MESSAGE,
   TICKET_ERROR_MESSAGE, TICKET_UNAVAILABLE_MESSAGE,
 } from "./ticket-prompts";
 
@@ -309,25 +309,20 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
           position: { x: 1200, y: 360 },
         },
         {
-          type: "prompt", id: "ticket_confirm", name: "TICKET_CONFIRM", instructions: TICKET_CONFIRM_PROMPT,
-          instructions_mode: "append", shared_tool_ids: [], tools_mode: "replace",
+          type: "tool", id: "create_ticket", name: "CREATE_TICKET", shared_tool_id: tools.create_ticket,
           position: { x: 1500, y: 360 },
         },
         {
-          type: "tool", id: "create_ticket", name: "CREATE_TICKET", shared_tool_id: tools.create_ticket,
+          type: "speak", id: "ticket_created", name: "TICKET_CREATED", message: withGoodbye(TICKET_CREATED_MESSAGE),
           position: { x: 1800, y: 360 },
         },
         {
-          type: "speak", id: "ticket_created", name: "TICKET_CREATED", message: withGoodbye(TICKET_CREATED_MESSAGE),
-          position: { x: 2100, y: 360 },
-        },
-        {
           type: "speak", id: "ticket_error", name: "TICKET_ERROR", message: withGoodbye(TICKET_ERROR_MESSAGE),
-          position: { x: 1800, y: 540 },
+          position: { x: 1500, y: 540 },
         },
         {
           type: "speak", id: "ticket_unavailable", name: "TICKET_UNAVAILABLE", message: withGoodbye(TICKET_UNAVAILABLE_MESSAGE),
-          position: { x: 1500, y: 720 },
+          position: { x: 1200, y: 720 },
         },
         {
           type: "speak", id: "faq_error", name: "FAQ_ERROR", message: withGoodbye(FAQ_ERROR_MESSAGE), position: { x: 900, y: 540 },
@@ -450,40 +445,16 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
           condition: comparison("can_create_ticket", true, "!="),
         },
         {
-          id: "ticket_intake_to_confirm", start_node_id: "ticket_intake", target: { type: "node", node_id: "ticket_confirm" },
-          condition: { type: "llm", prompt: "The caller wants a support ticket, both subject and description are complete, and the latest SET_SUPPORT_VARIABLES call successfully stored both fields. Corrections must be stored before returning to confirmation." },
+          id: "ticket_intake_create", start_node_id: "ticket_intake", target: { type: "node", node_id: "create_ticket" },
+          condition: { type: "llm", prompt: "The assistant summarized the caller's request and asked the ticket creation question, the caller has explicitly agreed to that question, and the subsequent SET_SUPPORT_VARIABLES call successfully stored both ticket_subject and ticket_description. Silence, ambiguity, or merely already-filled variables do not authorize creation." },
         },
         {
           id: "ticket_intake_failed", start_node_id: "ticket_intake", target: { type: "node", node_id: "ticket_error" },
-          condition: { type: "llm", prompt: "The required SET_SUPPORT_VARIABLES update failed or was unavailable. Missing details alone require collection, not this error transition." },
+          condition: { type: "llm", prompt: "The SET_SUPPORT_VARIABLES update failed or was unavailable." },
         },
         {
           id: "ticket_intake_cancel", start_node_id: "ticket_intake", target: { type: "node", node_id: "goodbye" },
           condition: { type: "llm", prompt: "The caller declines the ticket offer, cancels, or asks to end the conversation." },
-        },
-        {
-          id: "ticket_confirm_unavailable", start_node_id: "ticket_confirm", target: { type: "node", node_id: "ticket_unavailable" },
-          condition: comparison("can_create_ticket", true, "!="),
-        },
-        {
-          id: "ticket_confirm_missing_subject", start_node_id: "ticket_confirm", target: { type: "node", node_id: "ticket_intake" },
-          condition: comparison("ticket_subject", ""),
-        },
-        {
-          id: "ticket_confirm_missing_description", start_node_id: "ticket_confirm", target: { type: "node", node_id: "ticket_intake" },
-          condition: comparison("ticket_description", ""),
-        },
-        {
-          id: "ticket_confirm_create", start_node_id: "ticket_confirm", target: { type: "node", node_id: "create_ticket" },
-          condition: { type: "llm", prompt: "The assistant restated this complete ticket request and asked 'Should I create this ticket?', and the caller has now explicitly agreed to that final confirmation question. Agreement to the earlier ticket offer, silence, ambiguity, or a correction is not final confirmation." },
-        },
-        {
-          id: "ticket_confirm_correct", start_node_id: "ticket_confirm", target: { type: "node", node_id: "ticket_intake" },
-          condition: { type: "llm", prompt: "The caller wants to correct the ticket subject or description before creation." },
-        },
-        {
-          id: "ticket_confirm_cancel", start_node_id: "ticket_confirm", target: { type: "node", node_id: "goodbye" },
-          condition: { type: "llm", prompt: "The caller refuses creation, cancels, or asks to end the conversation." },
         },
         {
           id: "ticket_creation_succeeded", start_node_id: "create_ticket", target: { type: "node", node_id: "ticket_created" },

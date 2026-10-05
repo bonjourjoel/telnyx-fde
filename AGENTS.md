@@ -923,19 +923,11 @@ Offers to create a ticket.
 ## TICKET CREATION BRANCH
 
 [P] TICKET_INTAKE
-Collects the subject and description.
+Summarizes the request.
+Asks whether to create a support ticket.
 Explicitly calls Update Dynamic Variables.
 |
-v
-[P] TICKET_CONFIRM
-Restates the request.
-Asks for permission to create the ticket.
-|
-+-- Correction -> TICKET_INTAKE
-|
-+-- Cancellation -> GOODBYE -> HANGUP
-|
-+-- Explicit confirmation
++-- Caller agrees and storage succeeds
 |
 v
 [T] CREATE_TICKET
@@ -958,6 +950,9 @@ Does not announce successful creation.
 |
 v
 GOODBYE -> HANGUP
+
+Decline, cancellation, or storage failure routes to GOODBYE or TICKET_ERROR
+without a separate confirmation node or correction loop.
 
 ## CROSS-CUTTING RULES
 
@@ -2305,37 +2300,35 @@ Purpose: MCP tool results and errors.
 ## STEP 13. ADD TICKET CREATION
 
 Objective:
-Create a ticket only after explicit confirmation.
+Create a ticket only after the caller explicitly agrees to the single offer.
 
 Tasks:
 
 1. Add TICKET_INTAKE:
    - Check can_create_ticket.
-   - Offer a ticket unless the caller already requested one; wait for acceptance.
-   - Collect the subject.
-   - Collect a concise description.
-   - Call SET_SUPPORT_VARIABLES.
+   - Briefly summarize the caller's request, then ask:
+     "Would you like me to create a support ticket?"
+   - Wait for the caller's answer about ticket creation.
+   - If the caller explicitly agrees, call SET_SUPPORT_VARIABLES with a short
+     ticket_subject and a faithful ticket_description based on the request.
+   - If SET_SUPPORT_VARIABLES succeeds, call transition__ticket_intake_create.
+   - If SET_SUPPORT_VARIABLES fails, call transition__ticket_intake_failed.
+   - If the caller declines, cancels, or wants to finish, call
+     transition__ticket_intake_cancel.
    - Do not ask for secrets, API keys, or passwords.
 
-2. Add TICKET_CONFIRM:
-   - Restate the request.
-   - Ask for permission.
-   - Correction: return to TICKET_INTAKE.
-   - Cancellation: GOODBYE.
-   - Explicit agreement: CREATE_TICKET.
-
-3. Add CREATE_TICKET:
+2. Add CREATE_TICKET:
    - Tool node.
    - Reference the webhook's shared_tool_id.
    - Parameters have exactly the same names as the variables.
 
-4. Wait for the synchronous webhook response.
+3. Wait for the synchronous webhook response.
 
-5. The store_fields_as_variables configuration stores:
+4. The store_fields_as_variables configuration stores:
    - created_ticket_id.
    - created_ticket_reference.
 
-6. Successful exit:
+5. Successful exit:
    - Compare telnyx_last_tool_status_code with the string "200"
      for this phone channel.
    - Verify the status value/type on the actual Portal voice smoke test too;
@@ -2343,29 +2336,31 @@ Tasks:
    - Also check that the expected result is present.
    - Move to TICKET_CREATED.
 
-7. TICKET_CREATED:
+6. TICKET_CREATED:
    - Speak the reference and goodbye together in one short message.
    - Default edge to the HANGUP Tool node.
 
-8. Default exit from CREATE_TICKET:
+7. Default exit from CREATE_TICKET:
    - TICKET_ERROR.
    - Say creation could not be confirmed, with goodbye in the same short Speak.
    - Default edge to HANGUP. Never claim no ticket exists after a timeout.
 
-9. No automatic retry that could announce an uncertain result.
+8. No automatic retry that could announce an uncertain result.
 
 Implementation for step 13:
 
-- config/ticket-prompts.ts holds Joel's approved structured intake/confirmation
-  wording and the short result prefixes. RESOLUTION now says only that the FAQ
-  does not cover the question and defaults to TICKET_INTAKE. MCP errors retain
-  their separate unavailable/closing branch. Transfer remains step 14.
-- Both intake and confirmation have a leading can_create_ticket != true guard
-  to TICKET_UNAVAILABLE. Confirmation checks missing subject/description before
-  any model turn. Intake uses only the shared updater; confirmation has no native
-  tools or MCP. Only a caller's explicit agreement to the final confirmation
-  question may route to CREATE_TICKET. Corrections return to intake and must be
-  stored again before a new confirmation; cancellation reaches goodbye/hangup.
+- config/ticket-prompts.ts holds Joel's approved single-offer intake wording and
+  the short result prefixes. RESOLUTION now says only that the FAQ does not cover
+  the question and defaults to TICKET_INTAKE. MCP errors retain their separate
+  unavailable/closing branch. Transfer remains step 14.
+- Intake has a leading can_create_ticket != true guard to TICKET_UNAVAILABLE and
+  uses only the shared updater. No separate confirmation node exists. The single
+  LLM creation transition requires that the assistant summarized this request,
+  asked the ticket creation question, the caller explicitly agreed to that
+  question, and the subsequent SET_SUPPORT_VARIABLES call successfully stored both
+  ticket_subject and ticket_description. Silence, ambiguity, or merely
+  already-filled variables do not authorize creation. No collection/correction
+  loops or field-readiness edges exist. Cancellation reaches goodbye/hangup.
 - CREATE_TICKET is a standalone Tool node using the existing shared id. Telnyx
   resolves ticket_subject/ticket_description arguments from the same variable
   names. Keep the signed synchronous backend, preset channel/caller/operation,
@@ -2380,15 +2375,18 @@ Implementation for step 13:
 - deploy.ts references CREATE_TICKET from the existing library upsert result and
   sends the entire desired graph on the existing assistant. Resource ids, phone
   routing, KV flag, HMAC, demo identity and Actor records are preserved.
-- Local tests cover capability and required-field guards, correction/cancellation
-  routes, typed success/fallback, tool scopes and stable-id readback repair. The
-  hosted model and actual voice callback are not simulated. Joel deploys and
-  follows docs/test-ticket-creation.md to verify the real Portal behavior, then
-  retrieves the ticket on a new call. Physical calls remain subject to D61.
+- Local tests cover the capability guard, the single LLM creation entry from
+  intake, the absence of a confirmation node and return-to-intake edges, scoped
+  tools, typed success/fallback and stable-id readback repair, plus an offline
+  reconciliation test that updates an existing assistant still carrying the
+  removed confirmation branch. The hosted model and actual voice callback are not
+  simulated. Joel deploys and follows docs/test-ticket-creation.md to verify the
+  real Portal behavior, then retrieves the ticket on a new call. Physical calls
+  remain subject to D61.
 
 Validation:
 
-- A confirmation creates one ticket.
+- An explicit agreement creates one ticket.
 - A cancellation creates none.
 - A new call retrieves the created ticket.
 - An HTTP error does not produce a success announcement.
@@ -2565,8 +2563,8 @@ Test the following scenarios, one at a time:
 7. technician_available = false.
 8. technician_available = true and successful transfer.
 9. Failed transfer followed by ticket creation.
-10. Incomplete information collection.
-11. Information correction before confirmation.
+10. Unanswered ticket creation offer: no creation.
+11. Declined ticket creation offer: goodbye without creation.
 12. Cancellation without creation.
 13. Successful creation, then retrieval on the next call.
 14. Creation webhook rejected or failing.
