@@ -38,7 +38,9 @@ function defaultVariables(): AssistantDefinition["dynamic_variables"] {
 
 // Build JSON from the actual Function URL and already-verified resource ids.
 // Only the updater is a model tool. All hangups use the org-level Tool node
-// after their closing Speak, including the title-only FAQ's farewell.
+// after their closing Speak, including the title-only FAQ's farewell. The
+// Step 14 transfer uses a standalone TRANSFER Tool node, never a model-visible
+// assistant tool.
 export function buildAssistant(functionUrl: string, projectName: string, mcpId: string, tools: SupportWorkflowTools): AssistantDefinition {
   const base = new URL(functionUrl);
   if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash || base.pathname !== "/" ||

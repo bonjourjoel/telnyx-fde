@@ -11,6 +11,9 @@
     "resetactor": "tsx scripts/reset-actor.ts",
     "seedticketsweb": "tsx scripts/seed-tickets.ts --web",
     "seedticketsphone": "tsx scripts/seed-tickets.ts --phone",
+    "technician:get": "tsx scripts/technician-flag.ts get",
+    "technician:true": "tsx scripts/technician-flag.ts true",
+    "technician:false": "tsx scripts/technician-flag.ts false",
     "help": "tsx scripts/help.ts"
   },
   "dependencies": {

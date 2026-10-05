@@ -913,41 +913,52 @@ Then the model chooses:
 | v
 | default -> [T] HANGUP
 |
-+-- Topic not covered, or MCP unavailable
++-- Topic not covered (list_topics succeeded but nothing matched)
 |
 v
-[P] RESOLUTION
+[S] RESOLUTION
 |
-+-- technician_available == false
+v
+[P] TECHNICIAN_OFFER
+|
++-- technician_available == false (preempts the model)
 | |
 | v
 | TICKET_INTAKE
 |
-+-- technician_available == true
-Offers a technician or a ticket.
++-- flag true: asks "Would you like me to connect you to a technician?"
 |
-+-- Ticket -> TICKET_INTAKE
++-- Caller explicitly agrees
+| |
+| v
+| [S] TRANSFER_MESSAGE
+| |
+| v
+| [T] TRANSFER
+| |
+| +-- Success: call transferred, no automatic workflow hangup
+| |
+| +-- Failure recognized by Telnyx
+|   |
+|   v
+|   [S] TRANSFER_FAILED
+|   |
+|   v
+|   TICKET_INTAKE (no second offer)
 |
-+-- Technician
++-- Caller declines (not ending)
+| |
+| v
+| TICKET_INTAKE
 |
-v
-[S] TRANSFER_MESSAGE
-|
-v
-[T] TRANSFER
-|
-+-- Success: call transferred
-|
-+-- Failure
-|
-v
-[P] TRANSFER_FAILED
-Offers to create a ticket.
-|
-+-- Yes -> TICKET_INTAKE
-|
-+-- No -> GOODBYE
--> HANGUP
++-- Caller ends or cancels
+  |
+  v
+  GOODBYE -> HANGUP
+
+MCP tool failure or unavailability routes to [S] FAQ_ERROR -> [T] HANGUP
+separately, not to RESOLUTION; an unavailable tool is never evidence of absent
+documentation coverage.
 
 ## TICKET CREATION BRANCH
 
@@ -2506,56 +2517,102 @@ Purpose: store_fields_as_variables, synchronous webhook, and exact schemas.
 ## STEP 14. ADD THE FLAG AND HUMAN TRANSFER
 
 Objective:
-Offer a technician only when configuration allows it.
+Offer a technician only when configuration allows it. The approved implementation
+inserts four nodes (TECHNICIAN_OFFER, TRANSFER_MESSAGE, TRANSFER,
+TRANSFER_FAILED) into the existing 16-node graph, produces a 20-node graph, and
+reuses the existing TRANSFER shared tool id. RESOLUTION's prior default exit
+to TICKET_INTAKE is replaced with `resolution_to_technician_offer`. The TRANSFER
+Tool node carries a single default failure exit per the Conversation Workflows
+docs; there is no success hangup edge, no status comparison, and no retry.
 
-Tasks:
+Implementation scope (local checks only; live deployment is run by Joel):
 
-1. Add RESOLUTION.
-2. Add a deterministic transition:
-   technician_available == false -> TICKET_INTAKE
-
-3. When the flag is true:
-   - Offer a technician or a ticket.
-   - Ticket choice: TICKET_INTAKE.
-   - Technician choice: TRANSFER_MESSAGE.
-
-4. TRANSFER_MESSAGE:
-   - Speak a transfer announcement.
-   - Default transition to TRANSFER.
-
-5. TRANSFER:
-   - Tool node using the transfer's shared_tool_id.
-   - One default exit to TRANSFER_FAILED.
-   - This exit handles transfer failure.
-
-6. TRANSFER_FAILED:
-   - Explain that the transfer did not succeed.
-   - Offer to create a ticket.
-   - Yes: TICKET_INTAKE.
-   - No: GOODBYE, then HANGUP.
-
-7. On successful transfer:
-   - Do not execute an automatic workflow hangup.
-
-8. Modify the flag directly in KV.
-   The new value takes effect on the next call.
+1. RESOLUTION stays exactly the approved Speak
+   "The FAQ doesn't cover this question." Its sole default exit is renamed to
+   `resolution_to_technician_offer` and targets the new TECHNICIAN_OFFER Prompt.
+2. TECHNICIAN_OFFER prompts "Would you like me to connect you to a technician?"
+   and exposes only Telnyx outgoing LLM transition tools (instructions_mode
+   append, tools_mode replace, shared_tool_ids empty). It has a leading
+   expression guard `technician_available == false -> TICKET_INTAKE` that
+   executes before the model turn; flag true lets the model ask the question.
+   The backend already validates a primitive boolean, so the prompt never
+   references the flag. Three LLM edges:
+   - technician_offer_transfer -> TRANSFER_MESSAGE (explicit agreement only;
+     silence, ambiguity, or old context do not qualify)
+   - technician_offer_ticket -> TICKET_INTAKE (decline technician, not ending)
+   - technician_offer_cancel -> GOODBYE (end or cancel)
+3. TRANSFER_MESSAGE Speak is verbatim "I'll connect you to a technician now."
+   with a single default edge to the TRANSFER Tool node.
+4. TRANSFER Tool node uses the existing TRANSFER shared tool id from
+   syncSharedTools. It has exactly one outgoing default edge to TRANSFER_FAILED,
+   used only on transfer failure. No success edge, no status comparison, no
+   automatic hangup, no retry, and no model-visible transfer tool. Existing
+   transfer tool/telephony/profile/targets are unchanged.
+5. TRANSFER_FAILED Speak is verbatim "I couldn't connect you to a technician."
+   with a single default edge to TICKET_INTAKE. The Speak adds no separate
+   ticket wording; TICKET_INTAKE alone summarizes the request and offers
+   creation. No separate confirmation Prompt or correction loop is introduced.
+6. TICKET_INTAKE prompt, capability guard, create/cancel/error branches, and
+   all business contracts remain unchanged. RESOLUTION never routes to
+   TICKET_INTAKE directly anymore; only the technician offer decline,
+   transfer failure, and the leading `technician_available == false` guard do.
+7. Preserve GREETING, MAIN_ROUTING, TICKET_SELECTION, the single-ticket
+   automatic shortcut, FAQ and error behavior, existing node ids, and
+   per-source edge declaration order. The new transfer string is added to
+   SupportWorkflowTools and all call sites/fixtures; deploy passes the
+   verified existing transfer id and fails safely if missing, exactly like
+   the other ids. Assistant tool_ids remains only the updater; the full
+   graph references the standalone TRANSFER Tool node. Existing
+   reconciliation GET/upsert supports the new 20-node graph with the same
+   resources, including an upgrade from a previously deployed 16-node graph.
+ 8. On successful transfer: do not execute an automatic workflow hangup. The
+   call exits the workflow once Telnyx transfers the call; the single failure
+   default is the only defined exit.
+ 9. The flag is read/modified directly in KV. Three npm commands
+    (technician:get / technician:true / technician:false) run one shared CLI
+    (`scripts/technician-flag.ts`) with strict get/true/false mode. The CLI
+    rejects unknown/extra args before .env load or account access, reuses
+    createDeploymentStateStore for the existing kv_namespace_id and
+    createTelnyxApi for the authenticated fixed-host bounded HTTP, and never
+    creates namespaces/resources or provisions missing configuration. The new
+    value takes effect on the next call; no redeploy is required.
+10. KV stores the entire `support/config` object under one key, so the CLI
+    performs a whole-object GET, replaces only `technician_available`, and PUTs
+    the full JSON object back to the same key. There is no documented atomic
+    compare-and-swap for that endpoint, so administrative flag edits must run
+    sequentially: do not run `technician:true`/`technician:false` concurrently
+    with each other or with a redeploy that also writes `support/config`.
 
 Validation:
 
-- Flag false: no technician offered.
-- Flag true: technician offer available.
-- Real transfer to the demo number.
-- Failed transfer: return to the ticket offer.
+- Flag false: TECHNICIAN_OFFER preempts the model and routes to TICKET_INTAKE
+  before any question is asked.
+- Flag true: the assistant offers a technician; agreement goes to
+  TRANSFER_MESSAGE -> TRANSFER.
+- A successful transfer exits the workflow without an automatic hangup; a
+  failure recognized by Telnyx on the real call routes through TRANSFER_FAILED
+  back to the unchanged TICKET_INTAKE. No second offer is read inside the
+  failure Speak and no automatic retry runs.
+- A repeated transfer offer never runs on the FAQ, ticket follow-up, ticket
+  status, or hangup paths; only the technician offer branch can transfer.
+- Live transfer to the demo number, real failure callbacks, and physical
+  voice remain to be verified by Joel after deployment.
 
 Documentation:
 
 Title: Conversation Workflows
 URL: https://developers.telnyx.com/docs/inference/ai-assistants/workflows
-Purpose: the transfer Tool's specific behavior and failure exit.
+Purpose: the transfer Tool's default failure exit only, deterministic
+comparison preemption of the model turn, and per-node tool scoping.
+
+Title: KV Quick Start (REST API)
+URL: https://developers.telnyx.com/docs/edge-compute/kv/quick-start
+Purpose: documented raw-key GET/PUT used by the technician flag CLI on the
+existing support/config key; no new backend endpoint.
 
 Title: Create an Assistant
 URL: https://developers.telnyx.com/api-reference/assistants/create-an-assistant
-Purpose: transfer configuration and targets.
+Purpose: transfer configuration and standalone Tool node reference.
 
 Title: KV Quick Start
 URL: https://developers.telnyx.com/docs/edge-compute/kv/quick-start

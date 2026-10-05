@@ -15,6 +15,12 @@ export const COMMAND_USAGE: Readonly<Record<string, CommandUsage>> = {
   seedticketsweb: { description: "Load the ready-made tickets into the Portal demo Actor." },
   seedticketsphone: { description: "Load the same tickets for one phone caller.", arguments: "-- <E164_PHONE>",
     note: "Phone number is required; creates the caller Actor if needed. Use --silent to suppress npm's argument banner." },
+  "technician:get": { description: "Read technician_available from the existing support/config KV key.",
+    note: "Values take effect on the next call; no redeploy is needed." },
+  "technician:true": { description: "Set technician_available to true in the existing support/config KV key.",
+    note: "Required for the workflow to offer a technician; takes effect on the next call." },
+  "technician:false": { description: "Set technician_available to false in the existing support/config KV key.",
+    note: "Disables the technician offer; takes effect on the next call." },
 };
 
 // Refuse missing descriptions or stale entries instead of silently omitting

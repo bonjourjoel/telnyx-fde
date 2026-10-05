@@ -24,6 +24,7 @@ A Telnyx Edge **StatefulActor** project, scaffolded with `telnyx-edge new-func -
 | `scripts/seed-tickets.ts` / `scripts/lib/ticket-fixtures.ts` | Shared seed command and ready-made fixture loader for Portal and phone callers. |
 | `fixtures/tickets.json` | Two public demo ticket templates; no caller identity or credentials. |
 | `scripts/help.ts` / `scripts/lib/commands.ts` | Public npm command usage and shared descriptions. |
+| `scripts/technician-flag.ts` / `scripts/lib/technician-flag.ts` | Read or set the `technician_available` flag in the existing `support/config` KV key without redeploy. |
 | `src/faq.ts` | Verified catalogue of 12 public documentation topics with voice-length explanations. |
 | `src/mcp.ts` | Official SDK MCP endpoint with exactly three tools and no business resource access. |
 | `scripts/check-mcp.ts` / `scripts/check-mcp.test.ts` | Official client verification and sequential offline protocol checks. |
@@ -692,10 +693,12 @@ Assistant `tool_ids` contains only the updater for ticket follow-up/intake.
 HANGUP is available only through the standalone Tool node, never as a native
 tool for any Prompt. Existing assistant, MCP, shared-tool and phone ids are reused.
 
-No catalogue match reaches the short `RESOLUTION` Speak, then ticket intake.
-MCP failure still reaches a distinct `FAQ_ERROR` Speak with goodbye before hangup;
-unavailability is never declared as absent coverage. Ticket follow-up is preserved.
-Technician transfer remains step 14.
+No catalogue match reaches the short `RESOLUTION` Speak, then the technician
+offer branch added in step 14. MCP failure still reaches a distinct `FAQ_ERROR`
+Speak with goodbye before hangup; unavailability is never declared as absent
+coverage. Ticket follow-up is preserved. See
+[Technician flag and transfer (step 14)](#technician-flag-and-transfer-step-14)
+for the transfer branch.
 
 The local suite verifies ticket guard priority, title-only routing, closing
 Speak/default hangup paths, model tool scopes, allowlist repair and stable ids.
@@ -738,8 +741,9 @@ claiming no ticket exists. There is no automatic retry. Success, error and
 unavailability each use one short Speak containing goodbye, then default HANGUP.
 
 Deployment reuses the existing shared tool and assistant, replacing the complete
-graph. It never creates tickets, loads fixtures, resets Actors, changes caller
-HMAC/demo identity or toggles the technician flag. No transfer is offered yet.
+graph. It never creates tickets, loads fixtures, resets Actors, or changes caller
+HMAC/demo identity. The technician transfer is added by step 14, not this step;
+see [Technician flag and transfer (step 14)](#technician-flag-and-transfer-step-14).
 Local tests check the capability guard, the single LLM creation entry from intake,
 the absence of a confirmation node and return-to-intake edges, scoped tools,
 business argument names, the typed result fallback, readback drift, and an offline
@@ -748,6 +752,92 @@ confirmation branch. They do not run the hosted model or prove voice
 timing/callback behavior. Follow [test-ticket-creation.md](docs/test-ticket-creation.md)
 after deployment to verify the real single offer, decline, callback mappings and
 next-call retrieval on the stable Portal demo Actor.
+
+## Technician flag and transfer (step 14)
+
+The 16-node graph gains four nodes for `RESOLUTION -> TECHNICIAN_OFFER -> ?`,
+producing the 20-node workflow. `TECHNICIAN_OFFER` is a Prompt with only Telnyx
+LLM transition tools (instructions_mode append, tools_mode replace,
+`shared_tool_ids` empty). Its leading `technician_available == false` comparison
+preempts the model turn and routes straight to `TICKET_INTAKE`, so the flag
+remains a backend-validated primitive boolean and the prompt never mentions
+the flag. When the flag is true, the model asks the documented single question
+"Would you like me to connect you to a technician?" and three LLM edges
+decide the next node:
+
+- `technician_offer_transfer` -> `transfer_message` only on explicit agreement;
+  silence, ambiguity, or merely old conversation context does not qualify.
+- `technician_offer_ticket` -> `ticket_intake` on a decline of the technician
+  offer; ending or cancellation belongs to the cancel edge.
+- `technician_offer_cancel` -> `goodbye`.
+
+`TRANSFER_MESSAGE` is the verbatim Speak "I'll connect you to a technician now.",
+followed by the standalone `TRANSFER` Tool node that reuses the existing
+`TRANSFER` shared tool id from `syncSharedTools`. Per the Conversation Workflows
+documentation a transfer tool node accepts at most one outgoing default edge,
+used only if the transfer fails. There is no success hangup edge, no status
+comparison, and no automatic retry; the model never sees the transfer as a
+native tool, and `tool_ids` on the assistant stays only the updater.
+
+`TRANSFER_FAILED` is the verbatim Speak "I couldn't connect you to a
+technician." with a single default edge to `TICKET_INTAKE`. The message adds no
+ticket wording and no goodbye; `TICKET_INTAKE` alone summarizes the request and
+offers the single ticket. There is no separate confirmation Prompt or
+correction loop. `RESOLUTION` no longer routes to `TICKET_INTAKE` directly;
+only the technician offer decline, the transfer failure, and the
+`technician_available == false` guard do. The repeated-transfer guarantee is
+structural: only `TECHNICIAN_OFFER` can reach transfer, and the standalone
+TRANSFER Tool node is the only reference to the `TRANSFER` shared tool.
+
+The flag is read or modified in the existing `support/config` KV key with three
+short npm commands that all run one shared CLI (`scripts/technician-flag.ts`)
+in strict `get`/`true`/`false` mode. Unknown or extra args are rejected before
+any `.env` load or account access. The CLI reuses the deployment-state store
+for the existing `kv_namespace_id` and the shared bounded REST transport; it
+never creates namespaces or provisions missing configuration:
+
+```powershell
+npm.cmd run technician:get
+npm.cmd run technician:true
+npm.cmd run technician:false
+```
+
+`technician:get` reports only `technician_available = true/false`. `technician:true`
+and `technician:false` read the full stored JSON object, replace just the boolean,
+PUT the raw JSON to the same existing namespace and key, then GET and verify the
+expected full value (every unrelated and nested field preserved) before
+reporting success. The `already`-correct path skips the PUT. An uncertain or
+rejected write never reports success; a missing or invalid configuration never
+falls back to a default value; the readback mismatch is reported as its own
+diagnostic. KV whole-object updates have no documented atomic compare-and-swap,
+so the CLI never invents one; administrative flag edits must run sequentially and
+not concurrently with a redeploy that also writes `support/config`. The new value
+takes effect on the next call; no redeploy is required.
+
+Deployment reuses every shared tool and assistant id. It passes the verified
+existing `transfer` id to `buildAssistant` and fails safely if it is missing,
+exactly as it does for `hangup`, `set_support_variables`, and `create_ticket`.
+No phone constants, credentials, or new resources are introduced; transfer tool
+definitions, telephony, the existing outbound profile, and the configured
+targets are unchanged.
+
+Local verification:
+
+```powershell
+npm.cmd run typecheck
+npm.cmd run test
+```
+
+The suite covers the typed false guard, the lazy true decision, the single
+failure default with no success hangup, the unchanged intake after failure, the
+contained transfer scope on a single branch, the script/tool/note parity for
+the new prompts, the offline reconciliation of an older 16-node graph to the new
+20-node technician branch on the same assistant id, and the technician flag CLI
+behavior (strict args, field preservation, already-correct skip, every failure
+category, readback mismatch, and the narrow KV transport adapter). These checks
+do not exercise the hosted model or a real transfer. Follow
+[test-technician-transfer.md](docs/test-technician-transfer.md) after deployment
+for the real Portal smoke paths and the real-call transfer checks.
 
 ## KV failure diagnosis
 

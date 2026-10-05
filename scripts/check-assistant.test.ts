@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildAssistant, ASSISTANT_MODEL, ASSISTANT_INSTRUCTIONS, INIT_WEBHOOK_TIMEOUT_MS } from "../config/assistant";
-import { buildSupportWorkflow, validateConversationFlow, MAIN_ROUTING_PROMPT, TICKET_SELECTION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION, type ConversationFlow } from "../config/workflow";
+import { buildSupportWorkflow, validateConversationFlow, MAIN_ROUTING_PROMPT, TICKET_SELECTION_PROMPT, TECHNICIAN_OFFER_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION, type ConversationFlow } from "../config/workflow";
 import { FAQ_SHORT_PROMPT } from "../config/faq-prompts";
 import { TICKET_INTAKE_PROMPT } from "../config/ticket-prompts";
 import { buildSharedTools } from "../config/tools";
@@ -15,8 +15,9 @@ import { TelnyxApiError, type ApiMethod } from "./lib/telnyx-api";
 import type { DeploymentState, DeploymentStateStore } from "./lib/deployment-state";
 import type { ResourceApi } from "./lib/resource-upsert";
 
-// Fictional resource identities keep fixtures independent of the live account.
-const TOOL_IDS = { hangup: "tool-hangup", set_support_variables: "tool-updater", create_ticket: "tool-create-ticket" };
+// Fictional resource identifiers keep fixtures independent of the live account.
+// TRANSFER is referenced by the standalone TRANSFER Tool node added in step 14.
+const TOOL_IDS = { hangup: "tool-hangup", set_support_variables: "tool-updater", create_ticket: "tool-create-ticket", transfer: "tool-transfer" };
 const DEFINITION = buildAssistant("https://function.example.invalid", "telnyx-fde", "mcp-example", TOOL_IDS);
 
 // Interpret only deterministic guards from the actual JSON for negative cases.
@@ -122,7 +123,7 @@ test("support assistant keeps ticket context and scopes model tools for MCP FAQ"
   for (const key of [...WRITABLE_DYNAMIC_VARIABLE_KEYS, ...CREATED_TICKET_VARIABLE_KEYS]) assert.equal(DEFINITION.dynamic_variables[key], "");
   assert.deepEqual(DEFINITION.enabled_features, ["telephony"]);
   assert.deepEqual(DEFINITION.mcp_servers, [{ id: "mcp-example", allowed_tools: ["list_topics", "read_short_answer", "read_long_answer"] }]);
-  assert.equal(DEFINITION.conversation_flow.nodes.length, 16);
+  assert.equal(DEFINITION.conversation_flow.nodes.length, 20);
   const prompt = DEFINITION.conversation_flow.nodes.find((node) => node.type === "prompt" && node.id === "faq_short")!;
   assert.ok(prompt.type === "prompt");
   assert.equal(prompt.instructions, FAQ_SHORT_PROMPT);
@@ -288,9 +289,11 @@ test("ticket preparation guards fail closed and preserve cancellation paths", ()
   // No confirmation node or its edges survive.
   assert.ok(!flow.nodes.some(node => node.id === "ticket_confirm"));
   assert.ok(!flow.edges.some(edge => edge.id.startsWith("ticket_confirm_")));
-  // No return-to-intake edges except resolution_to_intake.
+  // Step 14 lets the technician offer decline and the transfer failure route back
+  // to TICKET_INTAKE, alongside the leading technician_available == false guard.
+  // RESOLUTION no longer routes to intake directly; it hands off to TECHNICIAN_OFFER.
   const backToIntake = flow.edges.filter(edge => edge.target.node_id === "ticket_intake").map(edge => edge.id).sort();
-  assert.deepEqual(backToIntake, ["resolution_to_intake"]);
+  assert.deepEqual(backToIntake, ["technician_offer_ticket", "technician_offer_unavailable", "transfer_failed_to_intake"]);
   // Capability, error and cancel transitions remain.
   const paths = { ticket_intake_cancel: "goodbye", ticket_intake_failed: "ticket_error" };
   for (const [id, target] of Object.entries(paths)) assert.equal(flow.edges.find(edge => edge.id === id)!.target.node_id, target);
@@ -327,6 +330,9 @@ test("ticket tools remain scoped and bind exact business variables", () => {
   for (const node of flow.nodes) if (node.type === "prompt") {
     assert.ok(!node.shared_tool_ids.includes(TOOL_IDS.create_ticket));
     assert.ok(!node.shared_tool_ids.includes(TOOL_IDS.hangup));
+    // Step 14 transfer is never model-visible; it runs only on the standalone
+    // TRANSFER Tool node reached after the caller's explicit agreement.
+    assert.ok(!node.shared_tool_ids.includes(TOOL_IDS.transfer));
   }
   const create = flow.nodes.find(node => node.id === "create_ticket")!;
   assert.ok(create.type === "tool"); assert.equal(create.shared_tool_id, TOOL_IDS.create_ticket);
@@ -365,8 +371,82 @@ test("title-only FAQ closes through goodbye without a long-answer branch", () =>
   const error = flow.nodes.find(node => node.id === "faq_error")!;
   assert.ok(noMatch.type === "speak" && error.type === "speak");
   assert.equal(noMatch.message, "The FAQ doesn't cover this question."); assert.match(error.message, /couldn't retrieve/);
-  assert.equal(flow.edges.find(edge => edge.start_node_id === "resolution")!.target.node_id, "ticket_intake");
+  assert.equal(flow.edges.find(edge => edge.start_node_id === "resolution")!.target.node_id, "technician_offer");
   assert.ok(!flow.nodes.some(node => node.id === "conversation"));
+});
+
+// Step 14 technician offer. The leading technician_available == false comparison
+// preempts the model turn and routes to TICKET_INTAKE; flag true leaves the
+// decision to the model. The Prompt exposes only Telnyx LLM transition tools.
+test("technician offer preempts on flag false and leaves intent to the model when true", () => {
+  const flow = DEFINITION.conversation_flow;
+  const edges = flow.edges.filter(edge => edge.start_node_id === "technician_offer");
+  // Exactly one deterministic guard, declared first so it wins on calls.
+  const expressionIds = edges.filter(edge => edge.condition.type === "expression").map(edge => edge.id);
+  assert.deepEqual(expressionIds, ["technician_offer_unavailable"]);
+  assert.equal(edges.find(edge => edge.id === "technician_offer_unavailable")!.target.node_id, "ticket_intake");
+  // Three LLM transitions and no default edge on the Prompt.
+  const llmIds = edges.filter(edge => edge.condition.type === "llm").map(edge => edge.id).sort();
+  assert.deepEqual(llmIds, ["technician_offer_cancel", "technician_offer_ticket", "technician_offer_transfer"]);
+  assert.ok(!edges.some(edge => edge.condition.type === "default"));
+  // Flag false preempts the model; flag true and non-boolean shadows do not.
+  assert.equal(expressionTarget("technician_offer", { technician_available: false }), "ticket_intake");
+  assert.equal(expressionTarget("technician_offer", { technician_available: true }), undefined);
+  for (const value of ["true", "false", 1, null, undefined, "yes"]) {
+    assert.equal(expressionTarget("technician_offer", { technician_available: value }), undefined);
+  }
+  // The transfer edge requires explicit agreement, with silence/ambiguity excluded.
+  const transfer = edges.find(edge => edge.id === "technician_offer_transfer")!;
+  assert.equal(transfer.condition.type === "llm" && transfer.target.node_id, "transfer_message");
+  assert.match(transfer.condition.type === "llm" ? transfer.condition.prompt : "", /explicitly agreed/i);
+  assert.match(transfer.condition.type === "llm" ? transfer.condition.prompt : "", /silence, ambiguity, or merely old conversation context/i);
+  // Decline routes to TICKET_INTAKE rather than goodbye; cancellation is separate.
+  assert.equal(edges.find(edge => edge.id === "technician_offer_ticket")!.target.node_id, "ticket_intake");
+  assert.equal(edges.find(edge => edge.id === "technician_offer_cancel")!.target.node_id, "goodbye");
+  // The Prompt owns no business tools; only outgoing LLM transition tools.
+  const technicianOffer = flow.nodes.find(node => node.id === "technician_offer")!;
+  assert.ok(technicianOffer.type === "prompt");
+  assert.equal(technicianOffer.instructions, TECHNICIAN_OFFER_PROMPT);
+  assert.equal(technicianOffer.instructions_mode, "append");
+  assert.equal(technicianOffer.tools_mode, "replace");
+  assert.deepEqual(technicianOffer.shared_tool_ids, []);
+  // The prompt's documented transition calls match its LLM edges exactly.
+  const calls = [...new Set([...technicianOffer.instructions.matchAll(/transition__([a-z_]+)/g)].map(match => match[1]))];
+  assert.deepEqual(calls.sort(), [...llmIds]);
+});
+
+// Step 14 transfer flow. Only the technician offer branch can transfer, the
+// TRANSFER Tool node carries a single failure default exit, and the failure
+// Speak returns to the unchanged TICKET_INTAKE without offering a ticket again.
+test("only the technician branch transfers with one failure default to intake", () => {
+  const flow = DEFINITION.conversation_flow;
+  const transferMessage = flow.nodes.find(node => node.id === "transfer_message")!;
+  assert.ok(transferMessage.type === "speak");
+  assert.equal(transferMessage.message, "I'll connect you to a technician now.");
+  assert.ok(!transferMessage.message.includes("ticket"));
+  const transferMessageEdge = flow.edges.find(edge => edge.start_node_id === "transfer_message")!;
+  assert.equal(transferMessageEdge.condition.type, "default");
+  assert.equal(transferMessageEdge.target.node_id, "transfer");
+  const transfer = flow.nodes.find(node => node.id === "transfer")!;
+  assert.ok(transfer.type === "tool");
+  assert.equal(transfer.shared_tool_id, TOOL_IDS.transfer);
+  const transferEdges = flow.edges.filter(edge => edge.start_node_id === "transfer");
+  assert.equal(transferEdges.length, 1);
+  // No success edge, no status comparison, no automatic hangup, no retry, and no
+  // model-visible transfer tool: the failure default is the only way out.
+  assert.equal(transferEdges[0].condition.type, "default");
+  assert.equal(transferEdges[0].target.node_id, "transfer_failed");
+  assert.ok(!transferEdges.some(edge => edge.condition.type === "expression"));
+  // The transfer failed Speak is verbatim and has no ticket wording; its single
+  // default routes to TICKET_INTAKE, where the unchanged offer is presented once.
+  const transferFailed = flow.nodes.find(node => node.id === "transfer_failed")!;
+  assert.ok(transferFailed.type === "speak");
+  assert.equal(transferFailed.message, "I couldn't connect you to a technician.");
+  assert.ok(!transferFailed.message.includes("ticket"));
+  assert.ok(!transferFailed.message.includes(GOODBYE_MESSAGE));
+  const transferFailedEdge = flow.edges.find(edge => edge.start_node_id === "transfer_failed")!;
+  assert.equal(transferFailedEdge.condition.type, "default");
+  assert.equal(transferFailedEdge.target.node_id, "ticket_intake");
 });
 
 // Account availability is a GET; failure never silently picks another model.
@@ -495,17 +575,48 @@ test("removed confirmation branch is reconciled on the same assistant", async ()
 });
 
 // A deployed assistant still carrying the old combined 15-node ORIENTATION graph
-// is reconciled to the split 16-node MAIN_ROUTING and TICKET_SELECTION graph on
-// the same assistant id, with no new assistant, tools, or resources created.
-// This proves the migration from the single combined node to the approved split
-// without orphaning the existing assistant. It is an offline reconciliation check,
-// not hosted-model or live voice proof.
+// is reconciled to the 20-node MAIN_ROUTING / TICKET_SELECTION graph with the
+// Step 14 technician offer and transfer nodes on the same assistant id, with no
+// new assistant, tools, or resources created. This proves the migration from the
+// single combined node to the approved split-updating workflow without orphaning
+// the existing assistant. It is an offline reconciliation check, not hosted-model
+// or live voice proof.
+//
+// The stored graph is rebuilt from the current 20-node form in two passes so the
+// resulting legacy form genuinely matches the previously deployed 15-node graph:
+// (a) remove the four Step 14 nodes (and their branch edges), restoring the
+// resolution_to_intake edge, which yields the 16-node step 11/12/13 form; then
+// (b) combine main_routing + ticket_selection (2 nodes) into the single
+// ORIENTATION node, yielding 15. The counts below assert each pass.
 test("combined orientation graph is reconciled to the split main routing and ticket selection", async () => {
   const store = new Store(); const api = new Registry(store);
   const first = await upsertAssistant(api, store, DEFINITION);
-  // Rewrite the stored graph to the previously deployed 15-node ORIENTATION form.
+  // Rewrite the stored graph in two passes: (a) peel off the step 14 technician
+  // branch and restore the original resolution_to_intake edge, then (b) collapse
+  // main_routing + ticket_selection into the legacy single ORIENTATION node. The
+  // resulting graph has exactly 15 nodes, matching the deployed step 11/12/13 form.
   const stored = api.items.get(first.resource.id)!;
   const flow = stored.conversation_flow as { nodes: Record<string, unknown>[]; edges: Record<string, unknown>[] };
+  // (a) Peel step 14: remove its four nodes and seven branch edges, then restore
+  // the original resolution_to_intake edge that step 14 replaced.
+  flow.nodes = flow.nodes.filter(node =>
+    node.id !== "technician_offer" && node.id !== "transfer_message" &&
+    node.id !== "transfer" && node.id !== "transfer_failed");
+  flow.edges = flow.edges.filter(edge =>
+    edge.id !== "resolution_to_technician_offer" &&
+    edge.id !== "technician_offer_unavailable" &&
+    edge.id !== "technician_offer_transfer" &&
+    edge.id !== "technician_offer_ticket" &&
+    edge.id !== "technician_offer_cancel" &&
+    edge.id !== "transfer_message_to_transfer" &&
+    edge.id !== "transfer_to_transfer_failed" &&
+    edge.id !== "transfer_failed_to_intake");
+  flow.edges.push({
+    id: "resolution_to_intake", start_node_id: "resolution",
+    target: { type: "node", node_id: "ticket_intake" }, condition: { type: "default" },
+  });
+  assert.equal(flow.nodes.length, 16, "after peeling step 14 the graph matches the step 11/12/13 16-node form");
+  // (b) Collapse main_routing + ticket_selection into the legacy ORIENTATION node.
   flow.nodes = flow.nodes.filter(node => node.id !== "main_routing" && node.id !== "ticket_selection");
   flow.nodes.push({
     type: "prompt", id: "orientation", name: "ORIENTATION",
@@ -537,16 +648,30 @@ test("combined orientation graph is reconciled to the split main routing and tic
     { id: "orientation_status_failed", start_node_id: "orientation",
       target: { type: "node", node_id: "ticket_status_error" }, condition: { type: "llm", prompt: "Legacy." } },
   );
+  assert.equal(flow.nodes.length, 15, "the legacy ORIENTATION graph has exactly 15 nodes");
   const second = await upsertAssistant(api, store, DEFINITION);
   assert.equal(second.action, "updated");
   assert.equal(second.resource.id, first.resource.id);
   assert.equal(api.items.size, 1);
   assert.equal(api.calls.filter(call => call.method === "POST" && call.path === "/ai/assistants").length, 1);
   const reconciled = api.items.get(first.resource.id)!.conversation_flow as typeof DEFINITION.conversation_flow;
-  assert.equal(reconciled.nodes.length, 16);
+  assert.equal(reconciled.nodes.length, 20);
   assert.ok(!reconciled.nodes.some(node => node.id === "orientation"));
   assert.ok(reconciled.nodes.some(node => node.id === "main_routing"));
   assert.ok(reconciled.nodes.some(node => node.id === "ticket_selection"));
+  // Step 14 nodes and edges are part of the reconciled desired graph on the same id.
+  assert.ok(reconciled.nodes.some(node => node.id === "technician_offer"));
+  assert.ok(reconciled.nodes.some(node => node.id === "transfer_message"));
+  assert.ok(reconciled.nodes.some(node => node.id === "transfer"));
+  assert.ok(reconciled.nodes.some(node => node.id === "transfer_failed"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "resolution_to_technician_offer"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "technician_offer_unavailable"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "technician_offer_transfer"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "technician_offer_ticket"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "technician_offer_cancel"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "transfer_message_to_transfer"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "transfer_to_transfer_failed"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "transfer_failed_to_intake"));
   assert.ok(!reconciled.edges.some(edge => edge.id === "greeting_to_orientation"));
   assert.ok(!reconciled.edges.some(edge => edge.id === "orientation_context_failed"));
   assert.ok(!reconciled.edges.some(edge => edge.id === "orientation_status_ready"));
@@ -560,6 +685,61 @@ test("combined orientation graph is reconciled to the split main routing and tic
   assert.ok(reconciled.edges.some(edge => edge.id === "ticket_selection_status_ready"));
   assert.ok(reconciled.edges.some(edge => edge.id === "ticket_selection_to_goodbye"));
   assert.ok(reconciled.edges.some(edge => edge.id === "ticket_selection_status_failed"));
+});
+
+// A deployed assistant still carrying the step 11/12/13 16-node graph (after
+// step 14 was reverted, or when upgrading from a step 13 deployment) is also
+// reconciled to the 20-node Step 14 graph on the same assistant id, with no new
+// assistant, tools, or resources created. The stored graph has exactly 16 nodes
+// at deploy time, then the desired 20-node graph replaces it through a single
+// POST update; a subsequent re-deploy reuses the same id without another write.
+test("step 13 16-node graph is reconciled to the step 14 20-node graph on the same id", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  // Peel step 14 from the stored graph and restore the original resolution_to_intake
+  // edge so the stored form matches the step 11/12/13 16-node graph exactly.
+  const stored = api.items.get(first.resource.id)!;
+  const flow = stored.conversation_flow as { nodes: Record<string, unknown>[]; edges: Record<string, unknown>[] };
+  flow.nodes = flow.nodes.filter(node =>
+    node.id !== "technician_offer" && node.id !== "transfer_message" &&
+    node.id !== "transfer" && node.id !== "transfer_failed");
+  flow.edges = flow.edges.filter(edge =>
+    edge.id !== "resolution_to_technician_offer" &&
+    edge.id !== "technician_offer_unavailable" &&
+    edge.id !== "technician_offer_transfer" &&
+    edge.id !== "technician_offer_ticket" &&
+    edge.id !== "technician_offer_cancel" &&
+    edge.id !== "transfer_message_to_transfer" &&
+    edge.id !== "transfer_to_transfer_failed" &&
+    edge.id !== "transfer_failed_to_intake");
+  flow.edges.push({
+    id: "resolution_to_intake", start_node_id: "resolution",
+    target: { type: "node", node_id: "ticket_intake" }, condition: { type: "default" },
+  });
+  assert.equal(flow.nodes.length, 16, "stored graph exactly matches the step 11/12/13 16-node form");
+  assert.ok(!flow.nodes.some(node => node.id === "technician_offer"));
+  assert.ok(!flow.edges.some(edge => edge.id === "resolution_to_technician_offer"));
+  assert.ok(flow.edges.some(edge => edge.id === "resolution_to_intake"));
+  // The next upsert replaces the graph in a single POST; no new assistant is created.
+  const second = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(second.action, "updated");
+  assert.equal(second.resource.id, first.resource.id);
+  assert.equal(api.items.size, 1);
+  assert.equal(api.calls.filter(call => call.method === "POST" && call.path === "/ai/assistants").length, 1);
+  const reconciled = api.items.get(first.resource.id)!.conversation_flow as typeof DEFINITION.conversation_flow;
+  assert.equal(reconciled.nodes.length, 20);
+  assert.ok(reconciled.nodes.some(node => node.id === "technician_offer"));
+  assert.ok(reconciled.nodes.some(node => node.id === "transfer_message"));
+  assert.ok(reconciled.nodes.some(node => node.id === "transfer"));
+  assert.ok(reconciled.nodes.some(node => node.id === "transfer_failed"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "resolution_to_technician_offer"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "transfer_to_transfer_failed"));
+  assert.ok(!reconciled.edges.some(edge => edge.id === "resolution_to_intake"));
+  // A re-run after the upgrade reuses the same id with no further writes.
+  const third = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(third.action, "reused");
+  assert.equal(third.resource.id, first.resource.id);
+  assert.equal(api.calls.filter(call => call.method === "POST" && call.path === "/ai/assistants").length, 1);
 });
 
 // A discovered id must also be hydrated, even when no id survived locally.

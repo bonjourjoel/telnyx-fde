@@ -858,12 +858,16 @@ async function main(): Promise<void> {
   const hangupId = sharedTools.find((tool) => tool.tool === "HANGUP")?.id;
   const updaterId = sharedTools.find((tool) => tool.tool === "SET_SUPPORT_VARIABLES")?.id;
   const createTicketId = sharedTools.find((tool) => tool.tool === "CREATE_TICKET")?.id;
+  const transferId = sharedTools.find((tool) => tool.tool === "TRANSFER")?.id;
   if (!hangupId) throw new TelnyxApiError("missing_hangup_tool_id");
   if (!updaterId) throw new TelnyxApiError("missing_variable_updater_tool_id");
   if (!createTicketId) throw new TelnyxApiError("missing_create_ticket_tool_id");
+  if (!transferId) throw new TelnyxApiError("missing_transfer_tool_id");
+  // Assistant tool_ids stays only the updater; the standalone TRANSFER Tool node
+  // and HANGUP reference their own shared tool ids, never the assistant's tools.
   const assistant = await upsertAssistant(getRestApi(), stateStore,
     buildAssistant(funcUrl, state.func_name, mcp.server.id,
-      { hangup: hangupId, set_support_variables: updaterId, create_ticket: createTicketId }));
+      { hangup: hangupId, set_support_variables: updaterId, create_ticket: createTicketId, transfer: transferId }));
   console.log(JSON.stringify({ operation: "assistant_upsert", action: assistant.action, id: assistant.resource.id }));
 
   // 17. Route the physical number with shared checkpoints and verification.

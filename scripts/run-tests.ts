@@ -16,6 +16,7 @@ const LOCAL_TEST_FILES = [
   "scripts/check-assistant.test.ts",
   "scripts/check-phone-routing.test.ts",
   "scripts/check-commands.test.ts",
+  "scripts/check-technician-flag.test.ts",
 ] as const;
 // Resolve the suite from the project root regardless of the caller's directory.
 const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));

@@ -1,8 +1,12 @@
-// Ticket follow-up and MCP FAQ workflow, with validated graph/tool references
-// and confirmed ticket creation. MAIN_ROUTING decides the caller's intent right
-// after the greeting; TICKET_SELECTION owns the ticket menu and status update.
-// The branch is fixed by MAIN_ROUTING; selection may clarify, cancel, or fail.
-// Transfer remains a later step.
+// Ticket follow-up, MCP FAQ, confirmed creation, and Step 14 technician transfer
+// workflow with validated graph/tool references. MAIN_ROUTING decides the caller's
+// intent right after the greeting; TICKET_SELECTION owns the ticket menu and
+// status update. The branch is fixed by MAIN_ROUTING; selection may clarify,
+// cancel, or fail. An uncovered FAQ question routes through RESOLUTION to
+// TECHNICIAN_OFFER, whose leading technician_available == false guard preempts the
+// model and goes straight to TICKET_INTAKE. When the flag is true the model offers
+// the technician; agreement reaches TRANSFER_MESSAGE -> TRANSFER, whose single
+// default failure exit returns to TICKET_INTAKE through TRANSFER_FAILED.
 
 import * as z from "zod/v4";
 import {
@@ -84,6 +88,31 @@ export const CONTEXT_UNAVAILABLE_MESSAGE =
 export const TICKET_STATUS_ERROR_MESSAGE =
   "I couldn't prepare the ticket status. Please try again later.";
 
+// Step 14 technician offer prompt. Owned by the new TECHNICIAN_OFFER Prompt node.
+// Only outgoing Telnyx LLM transition tools are used; this node exposes no business
+// tools (no updater, MCP, transfer, or hangup). The leading
+// technician_available == false comparison preempts the model turn before this prompt
+// is read, so the prompt itself never mentions the flag.
+export const TECHNICIAN_OFFER_PROMPT = `- FIRST ACTION:
+Ask:
+"Would you like me to connect you to a technician?"
+Wait for the caller's answer about connecting to a technician.
+
+- IF ANSWER IS YES:
+If the caller explicitly agrees to connect to a technician, call transition__technician_offer_transfer.
+
+- IF ANSWER IS NO:
+If the caller declines to connect to a technician, call transition__technician_offer_ticket.
+
+- IF THE CALLER WANTS TO FINISH:
+Call transition__technician_offer_cancel.`;
+
+// Step 14 transfer messages. Each Speak is verbatim per the approved design; the
+// failure Speak must not include a separate ticket offer, since its default edge
+// already routes to TICKET_INTAKE.
+export const TRANSFER_MESSAGE = "I'll connect you to a technician now.";
+export const TRANSFER_FAILED_MESSAGE = "I couldn't connect you to a technician.";
+
 // Keep the final business message and farewell in one audio step. Real Portal
 // traces showed consecutive Speak messages merged in text while only the first
 // had playback before hangup. Reuse the same farewell for all closing paths.
@@ -96,6 +125,9 @@ export interface SupportWorkflowTools {
   hangup: string;
   set_support_variables: string;
   create_ticket: string;
+  // Step 14 transfer tool. Only the standalone TRANSFER Tool node references it;
+  // no Prompt node may expose it as a model-visible native tool.
+  transfer: string;
 }
 
 // Explicit request schemas exclude resolved tools and other response-only fields.
@@ -286,7 +318,10 @@ function allOf(...conditions: ReturnType<typeof comparison>[]) {
 // MAIN_ROUTING owns the intent decision and the two preempting context guards;
 // TICKET_SELECTION owns the ticket menu and the status-ready guard only.
 export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationFlow {
-  const references = [tools.hangup, tools.set_support_variables, tools.create_ticket];
+  // The four shared tool ids must each be non-empty and unique so workflow
+  // validation can scope them per node. The assistant itself only exposes the
+  // updater; the others are referenced by standalone Tool nodes.
+  const references = [tools.hangup, tools.set_support_variables, tools.create_ticket, tools.transfer];
   if (references.some(id => !id.trim()) || new Set(references).size !== references.length) {
     throw new Error("invalid support tool references");
   }
@@ -342,6 +377,16 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
           type: "speak", id: "resolution", name: "RESOLUTION", message: RESOLUTION_MESSAGE, position: { x: 900, y: 360 },
         },
         {
+          // Step 14 technician offer Prompt node. The leading
+          // technician_available == false guard preempts the model turn and routes
+          // directly to TICKET_INTAKE; when the flag is true the model asks the single
+          // question below and the caller's explicit answer selects the next node.
+          type: "prompt", id: "technician_offer", name: "TECHNICIAN_OFFER",
+          instructions: TECHNICIAN_OFFER_PROMPT, instructions_mode: "append",
+          shared_tool_ids: [], tools_mode: "replace",
+          position: { x: 1100, y: 540 },
+        },
+        {
           type: "prompt", id: "ticket_intake", name: "TICKET_INTAKE", instructions: TICKET_INTAKE_PROMPT,
           instructions_mode: "append", shared_tool_ids: [tools.set_support_variables], tools_mode: "replace",
           position: { x: 1200, y: 360 },
@@ -349,6 +394,27 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
         {
           type: "tool", id: "create_ticket", name: "CREATE_TICKET", shared_tool_id: tools.create_ticket,
           position: { x: 1500, y: 360 },
+        },
+        {
+          // Step 14 transfer announcement. Verbatim Speak per the approved design,
+          // followed by the standalone TRANSFER Tool node.
+          type: "speak", id: "transfer_message", name: "TRANSFER_MESSAGE", message: TRANSFER_MESSAGE,
+          position: { x: 1400, y: 540 },
+        },
+        {
+          // Step 14 TRANSFER Tool node. Per the Conversation Workflows docs, a
+          // transfer tool node accepts at most one outgoing default edge, used only
+          // if the transfer fails. There is no success edge, no status comparison,
+          // and no automatic hangup, retry, or model-visible transfer tool here.
+          type: "tool", id: "transfer", name: "TRANSFER", shared_tool_id: tools.transfer,
+          position: { x: 1700, y: 540 },
+        },
+        {
+          // Step 14 transfer failure Speak. Its single default edge returns to
+          // TICKET_INTAKE; the message does not add a separate ticket offer, since
+          // TICKET_INTAKE alone summarizes the request and asks whether to create one.
+          type: "speak", id: "transfer_failed", name: "TRANSFER_FAILED", message: TRANSFER_FAILED_MESSAGE,
+          position: { x: 1400, y: 720 },
         },
         {
           type: "speak", id: "ticket_created", name: "TICKET_CREATED", message: withGoodbye(TICKET_CREATED_MESSAGE),
@@ -492,7 +558,63 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
           id: "faq_short_failed", start_node_id: "faq_short", target: { type: "node", node_id: "faq_error" },
           condition: { type: "llm", prompt: "A required MCP tool failed or was unavailable, or returned an incomplete result, so the short documentation lookup could not be completed." },
         },
-        { id: "resolution_to_intake", start_node_id: "resolution", target: { type: "node", node_id: "ticket_intake" }, condition: { type: "default" } },
+        { id: "resolution_to_technician_offer", start_node_id: "resolution", target: { type: "node", node_id: "technician_offer" }, condition: { type: "default" } },
+        {
+          // Step 14 leading deterministic guard. The typed boolean comparison
+          // technician_available == false preempts the model turn on TECHNICIAN_OFFER
+          // and routes directly to TICKET_INTAKE. The backend already validates the
+          // flag is a primitive boolean, so no prompt-time flag logic is needed.
+          id: "technician_offer_unavailable", start_node_id: "technician_offer",
+          target: { type: "node", node_id: "ticket_intake" },
+          condition: comparison("technician_available", false),
+        },
+        {
+          // Step 14 LLM transfer transition. Explicit agreement to this exact
+          // question is required; silence, ambiguity, or old conversation context
+          // does not qualify, so the model must not transition on a vague "yes".
+          id: "technician_offer_transfer", start_node_id: "technician_offer",
+          target: { type: "node", node_id: "transfer_message" },
+          condition: {
+            type: "llm",
+            prompt: "The caller has explicitly agreed to connect to a technician in response to the technician offer question. Silence, ambiguity, or merely old conversation context does not qualify this transition.",
+          },
+        },
+        {
+          // Step 14 LLM decline transition. Declining the technician offer routes to
+          // TICKET_INTAKE. Ending or cancelling the conversation belongs to the
+          // cancel transition only, so a decline must not also be treated as a
+          // request to finish.
+          id: "technician_offer_ticket", start_node_id: "technician_offer",
+          target: { type: "node", node_id: "ticket_intake" },
+          condition: {
+            type: "llm",
+            prompt: "The caller has declined to connect to a technician but does not want to end the conversation. Ending or cancellation is handled by the cancel transition, not by this decline.",
+          },
+        },
+        {
+          // Step 14 LLM cancel transition. A request to finish the conversation
+          // routes to GOODBYE rather than the ticket intake, regardless of the offer.
+          id: "technician_offer_cancel", start_node_id: "technician_offer",
+          target: { type: "node", node_id: "goodbye" },
+          condition: { type: "llm", prompt: END_CONVERSATION_CONDITION },
+        },
+        {
+          id: "transfer_message_to_transfer", start_node_id: "transfer_message",
+          target: { type: "node", node_id: "transfer" }, condition: { type: "default" },
+        },
+        {
+          // Per the Conversation Workflows docs, a transfer tool node accepts at most
+          // one outgoing default edge, used only if the transfer fails. This default
+          // edge captures that failure path; there is no success edge here.
+          id: "transfer_to_transfer_failed", start_node_id: "transfer",
+          target: { type: "node", node_id: "transfer_failed" }, condition: { type: "default" },
+        },
+        {
+          // Transfer failure returns to the unchanged TICKET_INTAKE branch. No
+          // second ticket offer is read in this Speak; TICKET_INTAKE owns the offer.
+          id: "transfer_failed_to_intake", start_node_id: "transfer_failed",
+          target: { type: "node", node_id: "ticket_intake" }, condition: { type: "default" },
+        },
         {
           id: "ticket_intake_unavailable", start_node_id: "ticket_intake", target: { type: "node", node_id: "ticket_unavailable" },
           condition: comparison("can_create_ticket", true, "!="),
