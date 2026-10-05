@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildAssistant, ASSISTANT_MODEL, ASSISTANT_INSTRUCTIONS, INIT_WEBHOOK_TIMEOUT_MS } from "../config/assistant";
-import { buildSupportWorkflow, validateConversationFlow, ORIENTATION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION, type ConversationFlow } from "../config/workflow";
+import { buildSupportWorkflow, validateConversationFlow, MAIN_ROUTING_PROMPT, TICKET_SELECTION_PROMPT, GOODBYE_MESSAGE, END_CONVERSATION_CONDITION, type ConversationFlow } from "../config/workflow";
 import { FAQ_SHORT_PROMPT } from "../config/faq-prompts";
 import { TICKET_INTAKE_PROMPT } from "../config/ticket-prompts";
 import { buildSharedTools } from "../config/tools";
@@ -122,7 +122,7 @@ test("support assistant keeps ticket context and scopes model tools for MCP FAQ"
   for (const key of [...WRITABLE_DYNAMIC_VARIABLE_KEYS, ...CREATED_TICKET_VARIABLE_KEYS]) assert.equal(DEFINITION.dynamic_variables[key], "");
   assert.deepEqual(DEFINITION.enabled_features, ["telephony"]);
   assert.deepEqual(DEFINITION.mcp_servers, [{ id: "mcp-example", allowed_tools: ["list_topics", "read_short_answer", "read_long_answer"] }]);
-  assert.equal(DEFINITION.conversation_flow.nodes.length, 15);
+  assert.equal(DEFINITION.conversation_flow.nodes.length, 16);
   const prompt = DEFINITION.conversation_flow.nodes.find((node) => node.type === "prompt" && node.id === "faq_short")!;
   assert.ok(prompt.type === "prompt");
   assert.equal(prompt.instructions, FAQ_SHORT_PROMPT);
@@ -135,11 +135,26 @@ test("support assistant keeps ticket context and scopes model tools for MCP FAQ"
   assert.equal(DEFINITION.conversation_flow.nodes[0].type === "speak" && DEFINITION.conversation_flow.nodes[0].message, "{{greeting_text}}");
   const goodbye = DEFINITION.conversation_flow.nodes.find(node => node.id === "goodbye")!;
   assert.equal(goodbye.type === "speak" && goodbye.message, GOODBYE_MESSAGE);
-  const end = DEFINITION.conversation_flow.edges.find(edge => edge.id === "orientation_to_goodbye")!;
-  assert.equal(end.condition.type === "llm" && end.condition.prompt, END_CONVERSATION_CONDITION);
-  const orientation = DEFINITION.conversation_flow.nodes.find(node => node.id === "orientation")!;
-  assert.equal(orientation.type === "prompt" && orientation.instructions, ORIENTATION_PROMPT);
-  assert.deepEqual(orientation.type === "prompt" && orientation.shared_tool_ids, ["tool-updater"]);
+  // MAIN_ROUTING owns the intent decision and no business tools; its deterministic
+  // context guards preempt the model turn. The updater stays unavailable here.
+  const mainRouting = DEFINITION.conversation_flow.nodes.find(node => node.id === "main_routing")!;
+  assert.ok(mainRouting.type === "prompt");
+  assert.equal(mainRouting.instructions, MAIN_ROUTING_PROMPT);
+  assert.equal(mainRouting.instructions_mode, "append");
+  assert.deepEqual(mainRouting.shared_tool_ids, []);
+  assert.equal(mainRouting.tools_mode, "replace");
+  // TICKET_SELECTION keeps the variable updater; the branch is fixed by MAIN_ROUTING.
+  const ticketSelection = DEFINITION.conversation_flow.nodes.find(node => node.id === "ticket_selection")!;
+  assert.ok(ticketSelection.type === "prompt");
+  assert.equal(ticketSelection.instructions, TICKET_SELECTION_PROMPT);
+  assert.equal(ticketSelection.instructions_mode, "append");
+  assert.deepEqual(ticketSelection.shared_tool_ids, [TOOL_IDS.set_support_variables]);
+  assert.equal(ticketSelection.tools_mode, "replace");
+  // The combined ORIENTATION node no longer exists in the split graph.
+  assert.ok(!DEFINITION.conversation_flow.nodes.some(node => node.id === "orientation"));
+  // MAIN_ROUTING's goodbye transition shares the same end-conversation condition.
+  const mainRoutingGoodbye = DEFINITION.conversation_flow.edges.find(edge => edge.id === "main_routing_to_goodbye")!;
+  assert.equal(mainRoutingGoodbye.condition.type === "llm" && mainRoutingGoodbye.condition.prompt, END_CONVERSATION_CONDITION);
   assert.ok(!DEFINITION.tool_ids.includes("tool-create-ticket"));
   assert.throws(() => buildAssistant("http://unsafe.invalid", "telnyx-fde", "mcp", TOOL_IDS));
   assert.throws(() => buildAssistant("https://safe.invalid", "telnyx-fde", "", TOOL_IDS));
@@ -171,12 +186,30 @@ test("graph validation rejects missing/duplicate ids, invalid routing and unknow
 // Assert routing precedence from the actual graph, not a mirrored builder. These
 // cases prove conditions, not the hosted model's choice or native tool execution.
 test("context and status guards prevent empty or failed-context status delivery", () => {
-  const next = (values: Record<string, unknown>) => expressionTarget("orientation", values);
-  assert.equal(next({ init_ok: false, tickets_count: 0, selected_ticket_status_text: "" }), "context_unavailable");
-  assert.equal(next({ init_ok: false, tickets_count: 2, selected_ticket_status_text: "stale" }), "context_unavailable");
-  assert.equal(next({ init_ok: true, tickets_count: 0, selected_ticket_status_text: "stale" }), "faq_short");
-  assert.equal(next({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "" }), undefined);
-  assert.equal(next({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "Backend status." }), "ticket_status");
+  // MAIN_ROUTING deterministic guards preempt the model turn for failed init and
+  // zero tickets. A filled status variable never routes here; the status
+  // comparison belongs to TICKET_SELECTION only, so it never skips the intent
+  // decision and never resolves a positive ticket count to a deterministic target.
+  const routing = (values: Record<string, unknown>) => expressionTarget("main_routing", values);
+  assert.equal(routing({ init_ok: false, tickets_count: 0, selected_ticket_status_text: "" }), "context_unavailable");
+  assert.equal(routing({ init_ok: false, tickets_count: 2, selected_ticket_status_text: "stale" }), "context_unavailable");
+  assert.equal(routing({ init_ok: true, tickets_count: 0, selected_ticket_status_text: "stale" }), "faq_short");
+  assert.equal(routing({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "" }), undefined);
+  assert.equal(routing({ init_ok: true, tickets_count: 2, selected_ticket_status_text: "Backend status." }), undefined);
+  // Every positive ticket count leaves MAIN_ROUTING's intent decision to the
+  // model, for both empty and filled status. The status comparison belongs to
+  // TICKET_SELECTION only, so a positive count never resolves to an automatic target.
+  for (const tickets_count of [1, 2, 3]) {
+    for (const selected_ticket_status_text of ["", "Backend status."]) {
+      assert.equal(routing({ init_ok: true, tickets_count, selected_ticket_status_text }), undefined);
+    }
+  }
+  // TICKET_SELECTION owns the status-ready guard only. It cannot rely on init or
+  // ticket-count guards; its deterministic match is the status comparison alone.
+  const selection = (values: Record<string, unknown>) => expressionTarget("ticket_selection", values);
+  assert.equal(selection({ selected_ticket_status_text: "Backend status." }), "ticket_status");
+  assert.equal(selection({ selected_ticket_status_text: "" }), undefined);
+  assert.equal(selection({ init_ok: false, tickets_count: 0, selected_ticket_status_text: "" }), undefined);
   for (const source of ["ticket_status", "ticket_status_error", "faq_error", "ticket_created", "ticket_error", "ticket_unavailable"]) {
     const edge = DEFINITION.conversation_flow.edges.find(edge => edge.start_node_id === source)!;
     assert.equal(edge.condition.type, "default"); assert.equal(edge.target.node_id, "hangup");
@@ -186,6 +219,52 @@ test("context and status guards prevent empty or failed-context status delivery"
     assert.equal(node.message.split(GOODBYE_MESSAGE).length, 2);
     if (source === "ticket_status") assert.equal(node.message, `{{selected_ticket_status_text}} ${GOODBYE_MESSAGE}`);
   }
+});
+
+// MAIN_ROUTING fixes the branch; TICKET_SELECTION may clarify, cancel, or fail
+// only. This verifies the split structurally, not the hosted model's choice.
+test("main routing fixes the branch and ticket selection cannot return to FAQ or main routing", () => {
+  const flow = DEFINITION.conversation_flow;
+  // The greeting node has exactly one edge: a default transition to MAIN_ROUTING.
+  const greetingEdges = flow.edges.filter(edge => edge.start_node_id === "greeting");
+  assert.equal(greetingEdges.length, 1);
+  assert.equal(greetingEdges[0].condition.type, "default");
+  assert.equal(greetingEdges[0].target.node_id, "main_routing");
+  // MAIN_ROUTING exposes no business tools; only outgoing LLM transition tools.
+  const mainRouting = flow.nodes.find(node => node.id === "main_routing")!;
+  assert.ok(mainRouting.type === "prompt" && mainRouting.shared_tool_ids.length === 0);
+  const mainEdges = flow.edges.filter(edge => edge.start_node_id === "main_routing");
+  // The deterministic guards preempt the model turn in priority order.
+  const expressionIds = mainEdges.filter(edge => edge.condition.type === "expression").map(edge => edge.id);
+  assert.deepEqual(expressionIds, ["main_routing_context_failed", "main_routing_no_tickets"]);
+  // Three LLM choices and no default edge on the Prompt.
+  const llmIds = mainEdges.filter(edge => edge.condition.type === "llm").map(edge => edge.id).sort();
+  assert.deepEqual(llmIds, ["main_routing_to_faq_short", "main_routing_to_goodbye", "main_routing_to_ticket_selection"]);
+  // The three LLM edges reach the actual branch destinations, not just distinct ids.
+  const mainLlmTargets = Object.fromEntries(mainEdges.filter(edge => edge.condition.type === "llm").map(edge => [edge.id, edge.target.node_id]));
+  assert.deepEqual(mainLlmTargets, {
+    main_routing_to_faq_short: "faq_short",
+    main_routing_to_goodbye: "goodbye",
+    main_routing_to_ticket_selection: "ticket_selection",
+  });
+  assert.ok(!mainEdges.some(edge => edge.condition.type === "default"));
+  // The updater is unavailable to MAIN_ROUTING and available to selection/intake.
+  assert.ok(!mainRouting.shared_tool_ids.includes(TOOL_IDS.set_support_variables));
+  // TICKET_SELECTION may clarify, cancel, or fail only; no edge to FAQ or routing.
+  const selectionEdges = flow.edges.filter(edge => edge.start_node_id === "ticket_selection");
+  assert.ok(!selectionEdges.some(edge => edge.target.node_id === "faq_short"));
+  assert.ok(!selectionEdges.some(edge => edge.target.node_id === "main_routing"));
+  assert.deepEqual(selectionEdges.map(edge => edge.id).sort(),
+    ["ticket_selection_status_failed", "ticket_selection_status_ready", "ticket_selection_to_goodbye"]);
+  // The status-ready comparison is the only deterministic guard on selection.
+  const ready = selectionEdges.find(edge => edge.id === "ticket_selection_status_ready")!;
+  assert.ok(ready.condition.type === "expression" && ready.condition.expression.type === "comparison");
+  assert.equal(ready.target.node_id, "ticket_status");
+  const selection = flow.nodes.find(node => node.id === "ticket_selection")!;
+  assert.ok(selection.type === "prompt" && selection.shared_tool_ids.includes(TOOL_IDS.set_support_variables));
+  // MAIN_ROUTING's documented transition calls match its actual LLM edges.
+  const calls = [...new Set([...mainRouting.instructions.matchAll(/transition__([a-z_]+)/g)].map(match => match[1]))];
+  assert.deepEqual(calls.sort(), llmIds);
 });
 
 // The immutable capability is checked before the single offer; filled fields
@@ -413,6 +492,74 @@ test("removed confirmation branch is reconciled on the same assistant", async ()
   assert.ok(!reconciled.edges.some(edge => edge.id === "ticket_confirm_correct"));
   assert.ok(reconciled.nodes.some(node => node.id === "ticket_intake"));
   assert.ok(reconciled.edges.some(edge => edge.id === "ticket_intake_create"));
+});
+
+// A deployed assistant still carrying the old combined 15-node ORIENTATION graph
+// is reconciled to the split 16-node MAIN_ROUTING and TICKET_SELECTION graph on
+// the same assistant id, with no new assistant, tools, or resources created.
+// This proves the migration from the single combined node to the approved split
+// without orphaning the existing assistant. It is an offline reconciliation check,
+// not hosted-model or live voice proof.
+test("combined orientation graph is reconciled to the split main routing and ticket selection", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  // Rewrite the stored graph to the previously deployed 15-node ORIENTATION form.
+  const stored = api.items.get(first.resource.id)!;
+  const flow = stored.conversation_flow as { nodes: Record<string, unknown>[]; edges: Record<string, unknown>[] };
+  flow.nodes = flow.nodes.filter(node => node.id !== "main_routing" && node.id !== "ticket_selection");
+  flow.nodes.push({
+    type: "prompt", id: "orientation", name: "ORIENTATION",
+    instructions: "Legacy combined orientation.", instructions_mode: "append",
+    shared_tool_ids: [TOOL_IDS.set_support_variables], tools_mode: "replace",
+    position: { x: 300, y: 0 }, tools: [], model: null, external_llm: null,
+  });
+  flow.edges = flow.edges.filter(edge => !String(edge.id).startsWith("main_routing_")
+    && !String(edge.id).startsWith("ticket_selection_") && edge.id !== "greeting_to_main_routing");
+  flow.edges.push(
+    { id: "greeting_to_orientation", start_node_id: "greeting",
+      target: { type: "node", node_id: "orientation" }, condition: { type: "default" } },
+    { id: "orientation_context_failed", start_node_id: "orientation",
+      target: { type: "node", node_id: "context_unavailable" },
+      condition: { type: "expression", expression: { type: "comparison", op: "==",
+        left: { type: "variable", name: "init_ok" }, right: { type: "bool_literal", value: false } } } },
+    { id: "orientation_no_tickets", start_node_id: "orientation",
+      target: { type: "node", node_id: "faq_short" },
+      condition: { type: "expression", expression: { type: "comparison", op: "==",
+        left: { type: "variable", name: "tickets_count" }, right: { type: "number_literal", value: 0 } } } },
+    { id: "orientation_status_ready", start_node_id: "orientation",
+      target: { type: "node", node_id: "ticket_status" },
+      condition: { type: "expression", expression: { type: "comparison", op: "!=",
+        left: { type: "variable", name: "selected_ticket_status_text" }, right: { type: "string_literal", value: "" } } } },
+    { id: "orientation_to_faq_short", start_node_id: "orientation",
+      target: { type: "node", node_id: "faq_short" }, condition: { type: "llm", prompt: "Legacy." } },
+    { id: "orientation_to_goodbye", start_node_id: "orientation",
+      target: { type: "node", node_id: "goodbye" }, condition: { type: "llm", prompt: "Legacy." } },
+    { id: "orientation_status_failed", start_node_id: "orientation",
+      target: { type: "node", node_id: "ticket_status_error" }, condition: { type: "llm", prompt: "Legacy." } },
+  );
+  const second = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(second.action, "updated");
+  assert.equal(second.resource.id, first.resource.id);
+  assert.equal(api.items.size, 1);
+  assert.equal(api.calls.filter(call => call.method === "POST" && call.path === "/ai/assistants").length, 1);
+  const reconciled = api.items.get(first.resource.id)!.conversation_flow as typeof DEFINITION.conversation_flow;
+  assert.equal(reconciled.nodes.length, 16);
+  assert.ok(!reconciled.nodes.some(node => node.id === "orientation"));
+  assert.ok(reconciled.nodes.some(node => node.id === "main_routing"));
+  assert.ok(reconciled.nodes.some(node => node.id === "ticket_selection"));
+  assert.ok(!reconciled.edges.some(edge => edge.id === "greeting_to_orientation"));
+  assert.ok(!reconciled.edges.some(edge => edge.id === "orientation_context_failed"));
+  assert.ok(!reconciled.edges.some(edge => edge.id === "orientation_status_ready"));
+  assert.ok(!reconciled.edges.some(edge => edge.id === "orientation_status_failed"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "greeting_to_main_routing"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "main_routing_context_failed"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "main_routing_no_tickets"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "main_routing_to_faq_short"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "main_routing_to_ticket_selection"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "main_routing_to_goodbye"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "ticket_selection_status_ready"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "ticket_selection_to_goodbye"));
+  assert.ok(reconciled.edges.some(edge => edge.id === "ticket_selection_status_failed"));
 });
 
 // A discovered id must also be hydrated, even when no id survived locally.

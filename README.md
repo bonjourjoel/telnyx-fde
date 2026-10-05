@@ -591,26 +591,59 @@ and the [official OpenAPI schemas](https://github.com/team-telnyx/openapi/blob/m
 
 ## Ticket follow-up and explicit reset (step 11)
 
-The deployed configuration now adds `ORIENTATION` and `TICKET_STATUS`. The backend
-includes `status_text` in each presented ticket: reference, spoken status label,
-and the stored progress summary. The model selects a ticket by number, reference
-or subject, asks for clarification when needed, and copies that exact text through
-the existing `SET_SUPPORT_VARIABLES` tool. Only then does the Speak node announce
-the status and goodbye in one Speak message, then routes directly to hangup.
-The status-preparation error uses the same closing pattern. Free conversation
-and cancellation keep the separate GOODBYE node. No follow-up operation changes tickets.
+The workflow configuration uses `MAIN_ROUTING`, `TICKET_SELECTION`, and
+`TICKET_STATUS`. Step 11 splits the old combined `ORIENTATION` node into two
+focused nodes. The branch is fixed by `MAIN_ROUTING`; `TICKET_SELECTION` may
+clarify selection, cancel, or fail only, and never routes back to FAQ or main
+routing. The backend includes `status_text` in each presented ticket: reference,
+spoken status label, and the stored progress summary. After the caller chooses
+to follow up in `MAIN_ROUTING`, `TICKET_SELECTION` reads the menu, asks for
+clarification when needed, and copies the selected ticket's exact `status_text`
+into `selected_ticket_status_text` through the existing `SET_SUPPORT_VARIABLES`
+tool when more than one ticket is presented. Only then does the Speak node
+announce the status and goodbye in one Speak message, then routes directly to
+hangup. The status-preparation error uses the same closing pattern. Free
+conversation and cancellation keep the separate GOODBYE node. No follow-up
+operation changes tickets.
+
+Deterministic single-ticket shortcut: `/init` also prefills
+`selected_ticket_status_text` with the sole presented ticket's exact backend
+`status_text` when exactly one ticket remains after the backend filters, sorts,
+and limits the list. The count, `tickets_json`, and this prefill are all derived
+from the same presented array, with no extra Actor or KV call, no model turn, no
+storage write, and no invented status. The existing
+`selected_ticket_status_text != ""` comparison on `TICKET_SELECTION` then
+bypasses that node's model turn and routes directly to `TICKET_STATUS`, so the
+caller hears the status and goodbye without selecting a ticket from a menu.
+With zero presented tickets the prefill stays empty and `MAIN_ROUTING` routes to
+FAQ, so no ticket menu is read. With multiple presented tickets the prefill
+stays empty and `TICKET_SELECTION` reads the menu and lets the caller choose a
+ticket. The prefill only depends on
+successful reads and exactly one presented ticket, never on
+`can_create_ticket`, so callers without creation context still hear their
+single existing ticket announced. `SET_SUPPORT_VARIABLES` keeps its writable
+allowlist exactly the three existing keys; the backend prefill never widens
+tool permissions, and the tool still owns the multi-ticket copy. The old
+combined `ORIENTATION` node shared its status comparison with intent-like edges
+on a single node, so the prefill is unsafe there; the split `MAIN_ROUTING` plus
+`TICKET_SELECTION` workflow is required.
 
 This is a workaround for the observed consecutive-Speak audio problem: both
 messages appeared in the transcript, but only one playback completed before
 hangup and the farewell was not heard. The combined message needs a new Portal
 voice test after deployment; local graph tests cannot prove audio delivery.
 
-The orientation prompt has only the variable updater. Deterministic expression
-edges prioritize initialization failure, then an empty ticket list, then a filled
-status variable. An initialization failure gets an explicit unavailable message;
-it is never presented as an empty caller history. Updater failure has an error
-branch. Step 12 replaces the new-question placeholder with FAQ lookup; intake and
-transfer remain later work. Instruction mode stays append.
+`MAIN_ROUTING` owns no business tools; only Telnyx's outgoing LLM transition
+tools are available on that node. Its deterministic expression guards preempt
+the model turn in priority order: initialization failure, then an empty ticket
+list. A filled `selected_ticket_status_text` never routes here; the status
+comparison belongs to `TICKET_SELECTION` only, so a positive ticket count always
+leaves the intent decision to the model. An initialization failure gets an
+explicit unavailable message; it is never presented as an empty caller history.
+`TICKET_SELECTION` keeps the variable updater; its only deterministic guard is
+the nonempty status variable. Updater failure has an error branch. Step 12
+replaces the new-question placeholder with FAQ lookup; intake and transfer
+remain later work. Instruction mode stays append on both Prompt nodes.
 
 Assistant read-back verifies the configured shared model tools and the updater's exact
 writable allowlist. It preserves expression-edge priority while tolerating canvas
@@ -632,11 +665,14 @@ is never an assistant tool. Fixtures and reset reuse common backend authenticati
 and local HTTP helpers; logs report only safe operation/status metadata.
 
 See [test-tickets.md](docs/test-tickets.md) for the short deploy/reset/seed test
-sequence. The local suite checks reset/replay/isolation, counter restart, failures,
-formatted status context, expression precedence, and idempotent assistant updates.
-It does not execute a hosted LLM. Native tool update and spoken ticket selection
-still require a Portal voice test after deployment. Physical inbound calls remain
-blocked by the account-level D61 restriction recorded in AGENTS.md.
+sequence and the Portal smoke checks for the split. The local suite checks
+reset/replay/isolation, counter restart, failures, formatted status context,
+expression precedence, the MAIN_ROUTING/TICKET_SELECTION split, and idempotent
+assistant updates including reconciliation of an old 15-node ORIENTATION graph to
+the 16-node split on the same assistant id. It does not execute a hosted LLM.
+Native tool update and spoken ticket selection still require a Portal voice test
+after deployment. Physical inbound calls remain blocked by the account-level D61
+restriction recorded in AGENTS.md.
 
 ## Voice MCP FAQ (step 12)
 

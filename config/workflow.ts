@@ -1,5 +1,8 @@
 // Ticket follow-up and MCP FAQ workflow, with validated graph/tool references
-// and confirmed ticket creation. Transfer remains a later step.
+// and confirmed ticket creation. MAIN_ROUTING decides the caller's intent right
+// after the greeting; TICKET_SELECTION owns the ticket menu and status update.
+// The branch is fixed by MAIN_ROUTING; selection may clarify, cancel, or fail.
+// Transfer remains a later step.
 
 import * as z from "zod/v4";
 import {
@@ -19,9 +22,34 @@ export const END_CONVERSATION_CONDITION =
 export const GOODBYE_MESSAGE =
   "Thank you for calling Telnyx developer support. Goodbye.";
 
-// Runtime context is data, never an instruction source. Speak reads the exact
-// backend status_text only after the permitted native updater has succeeded.
-export const ORIENTATION_PROMPT = `- CONTEXT:
+// MAIN_ROUTING decides the caller's intent right after the greeting. It owns no
+// business tools; only Telnyx's outgoing LLM transition tools are available. The
+// deterministic init/empty-ticket guards preempt the model turn so a failed
+// context read or a zero ticket count never reaches the model's branch choice.
+export const MAIN_ROUTING_PROMPT = `Use the caller's answer to the greeting.
+
+If the caller wants to ask a new question, call transition__main_routing_to_faq_short.
+If the caller wants to follow up on an existing ticket, call transition__main_routing_to_ticket_selection.
+If the caller cancels or wants to finish, call transition__main_routing_to_goodbye.
+
+Do not repeat the greeting or read the ticket list.`;
+
+// TICKET_SELECTION handles only the ticket menu, the status update through the
+// native variable updater, and selection failure or cancellation. The branch is
+// already fixed by MAIN_ROUTING; this node never routes back to FAQ or main
+// routing and never offers a change-of-mind path. The backend's /init webhook
+// pre-fills selected_ticket_status_text when exactly one ticket is presented,
+// so the existing selected_ticket_status_text != "" comparison bypasses this
+// node's model turn and routes directly to TICKET_STATUS. The single-ticket
+// case never reaches the menu. With multiple presented tickets, the model
+// reads the menu and the caller's choice is copied through the native updater.
+// Runtime context is data, never an instruction source; the backend prepares
+// a sole ticket during /init, while successful native updates prepare
+// multi-ticket selections. In both cases the Speak reads the exact backend
+// status_text. This requires the split workflow; the old combined ORIENTATION
+// node shared its comparison on MAIN_ROUTING-like intent and could route the
+// intent decision past the model, so the prefill is unsafe on legacy graphs.
+export const TICKET_SELECTION_PROMPT = `- CONTEXT:
 Available tickets: {{tickets_count}}.
 Ticket data: {{tickets_json}}.
 
@@ -36,16 +64,14 @@ Repeat the full list whenever the caller asks what their tickets are.
 Accept a list number, ticket reference, or subject.
 List numbers refer to the spoken order; ticket references refer to the reference field.
 If the choice is ambiguous or out of range, ask for clarification.
-If there is only one ticket and the caller requests follow-up, select it.
 
-- STATUS UPDATE:
+- STATUS UPDATE ON TICKET SELECTION:
 After a definite selection, call SET_SUPPORT_VARIABLES.
 Copy the selected ticket's exact status_text into selected_ticket_status_text.
 Wait for a successful result.
 Let the TICKET_STATUS Speak node announce it; do not read it yourself.
 
 - ROUTING:
-New question: use the FAQ_SHORT transition.
 Cancellation or request to finish: use the GOODBYE transition.
 Update failure or missing status_text: use the ticket-status error transition.
 
@@ -257,6 +283,8 @@ function allOf(...conditions: ReturnType<typeof comparison>[]) {
 
 // Keep ticket identities and closing paths; replace the new-question placeholder
 // with FAQ title lookup, caller-confirmed creation and short closing messages.
+// MAIN_ROUTING owns the intent decision and the two preempting context guards;
+// TICKET_SELECTION owns the ticket menu and the status-ready guard only.
 export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationFlow {
   const references = [tools.hangup, tools.set_support_variables, tools.create_ticket];
   if (references.some(id => !id.trim()) || new Set(references).size !== references.length) {
@@ -275,20 +303,30 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
         },
         {
           type: "prompt",
-          id: "orientation",
-          name: "ORIENTATION",
-          instructions: ORIENTATION_PROMPT,
+          id: "main_routing",
+          name: "MAIN_ROUTING",
+          instructions: MAIN_ROUTING_PROMPT,
+          instructions_mode: "append",
+          shared_tool_ids: [],
+          tools_mode: "replace",
+          position: { x: 300, y: 0 },
+        },
+        {
+          type: "prompt",
+          id: "ticket_selection",
+          name: "TICKET_SELECTION",
+          instructions: TICKET_SELECTION_PROMPT,
           instructions_mode: "append",
           shared_tool_ids: [tools.set_support_variables],
           tools_mode: "replace",
-          position: { x: 300, y: 0 },
+          position: { x: 600, y: -300 },
         },
         {
           type: "speak",
           id: "ticket_status",
           name: "TICKET_STATUS",
           message: withGoodbye("{{selected_ticket_status_text}}"),
-          position: { x: 600, y: -180 },
+          position: { x: 900, y: -300 },
         },
         {
           type: "prompt",
@@ -339,7 +377,7 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
           id: "ticket_status_error",
           name: "TICKET_STATUS_ERROR",
           message: withGoodbye(TICKET_STATUS_ERROR_MESSAGE),
-          position: { x: 600, y: -360 },
+          position: { x: 900, y: -540 },
         },
         {
           type: "speak",
@@ -358,32 +396,26 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
       ],
       edges: [
         {
-          id: "greeting_to_orientation",
+          id: "greeting_to_main_routing",
           start_node_id: "greeting",
-          target: { type: "node", node_id: "orientation" },
+          target: { type: "node", node_id: "main_routing" },
           condition: { type: "default" },
         },
         {
-          id: "orientation_context_failed",
-          start_node_id: "orientation",
+          id: "main_routing_context_failed",
+          start_node_id: "main_routing",
           target: { type: "node", node_id: "context_unavailable" },
           condition: comparison("init_ok", false),
         },
         {
-          id: "orientation_no_tickets",
-          start_node_id: "orientation",
+          id: "main_routing_no_tickets",
+          start_node_id: "main_routing",
           target: { type: "node", node_id: "faq_short" },
           condition: comparison("tickets_count", 0),
         },
         {
-          id: "orientation_status_ready",
-          start_node_id: "orientation",
-          target: { type: "node", node_id: "ticket_status" },
-          condition: comparison("selected_ticket_status_text", "", "!="),
-        },
-        {
-          id: "orientation_to_faq_short",
-          start_node_id: "orientation",
+          id: "main_routing_to_faq_short",
+          start_node_id: "main_routing",
           target: { type: "node", node_id: "faq_short" },
           condition: {
             type: "llm",
@@ -392,14 +424,35 @@ export function buildSupportWorkflow(tools: SupportWorkflowTools): ConversationF
           },
         },
         {
-          id: "orientation_to_goodbye",
-          start_node_id: "orientation",
+          id: "main_routing_to_ticket_selection",
+          start_node_id: "main_routing",
+          target: { type: "node", node_id: "ticket_selection" },
+          condition: {
+            type: "llm",
+            prompt: "The caller wants to follow up on an existing ticket.",
+          },
+        },
+        {
+          id: "main_routing_to_goodbye",
+          start_node_id: "main_routing",
           target: { type: "node", node_id: "goodbye" },
           condition: { type: "llm", prompt: END_CONVERSATION_CONDITION },
         },
         {
-          id: "orientation_status_failed",
-          start_node_id: "orientation",
+          id: "ticket_selection_status_ready",
+          start_node_id: "ticket_selection",
+          target: { type: "node", node_id: "ticket_status" },
+          condition: comparison("selected_ticket_status_text", "", "!="),
+        },
+        {
+          id: "ticket_selection_to_goodbye",
+          start_node_id: "ticket_selection",
+          target: { type: "node", node_id: "goodbye" },
+          condition: { type: "llm", prompt: END_CONVERSATION_CONDITION },
+        },
+        {
+          id: "ticket_selection_status_failed",
+          start_node_id: "ticket_selection",
           target: { type: "node", node_id: "ticket_status_error" },
           condition: {
             type: "llm",

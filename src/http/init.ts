@@ -83,8 +83,26 @@ export async function handleInit(req: Request, context: HttpContext): Promise<Re
   variables.can_create_ticket = caller.value.operationId !== null;
   variables.operation_id = caller.value.operationId ?? "";
   variables.technician_available = config.value.technician_available;
-  variables.tickets_count = caller.value.tickets.length;
-  variables.tickets_json = JSON.stringify(caller.value.tickets);
+  // Derive the count, JSON payload, and the single-ticket status text from
+  // the same already-filtered, sorted, and limited presented array. No extra
+  // Actor/KV call, model turn, storage write, or invented status is involved.
+  const presented = caller.value.tickets;
+  variables.tickets_count = presented.length;
+  variables.tickets_json = JSON.stringify(presented);
+  // Single-ticket shortcut: when exactly one ticket is presented, pre-fill
+  // the selected status with that ticket's exact backend-generated status_text
+  // so the workflow's selected_ticket_status_text != "" comparison can bypass
+  // TICKET_SELECTION's model turn. The backend prepares this; the model never
+  // invents the status. With zero or multiple presented tickets, the variable
+  // is explicitly empty. MAIN_ROUTING sends zero-ticket callers to FAQ; with
+  // multiple tickets, TICKET_SELECTION reads the menu and SET_SUPPORT_VARIABLES
+  // copies the caller's selected status.
+  // This preparation depends on successful reads and exactly one presented
+  // ticket, not can_create_ticket, so callers without creation context still
+  // get their single existing ticket announced through the deterministic edge.
+  variables.selected_ticket_status_text = presented.length === 1
+    ? presented[0].status_text
+    : "";
   variables.greeting_text = variables.tickets_count > 0
     ? `Hello, this is the Telnyx developer support line. I have ${variables.tickets_count} recent or open ${variables.tickets_count === 1 ? "ticket" : "tickets"} for you. Would you like to follow up on a ticket or ask a new question?`
     : "Hello, this is the Telnyx developer support line. How can I help you today?";

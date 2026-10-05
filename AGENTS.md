@@ -851,25 +851,54 @@ It is not a Conversation Workflow node.
 Says {{greeting_text}}.
 |
 v
-[P] ORIENTATION
+[P] MAIN_ROUTING
+Decides the caller's intent right after the greeting. Owns no business tools;
+only Telnyx's outgoing LLM transition tools are available. Deterministic guards
+preempt the model turn in priority order:
+  init_ok == false -> CONTEXT_UNAVAILABLE
+  tickets_count == 0 -> FAQ_SHORT
+Then the model chooses:
 |
-+-- The caller selects an existing ticket
-| |
-| | copies the known status into a variable
-| v
-| [S] TICKET_STATUS
-| Says the selected ticket's status.
-| |
-| v
-| [S] GOODBYE
++-- The caller wants to follow up on an existing ticket
 | |
 | v
-| [T] HANGUP
+| [P] TICKET_SELECTION
+| With one presented ticket /init prefills selected_ticket_status_text, so the
+| nonempty-status comparison bypasses this node and routes to TICKET_STATUS.
+| With multiple presented tickets it reads the menu, asks for clarification
+| when needed, and copies the chosen ticket's status_text through
+| SET_SUPPORT_VARIABLES. Never routes back to FAQ or main routing; may
+| clarify, cancel, or fail only.
+| |
+| +-- Definite selection and update succeeds
+| | |
+| | v
+| | [S] TICKET_STATUS
+| | Says the selected ticket's status and goodbye in one Speak.
+| | |
+| | v
+| | [T] HANGUP
+| |
+| +-- Cancellation or request to finish
+| | |
+| | v
+| | [S] GOODBYE
+| | |
+| | v
+| | [T] HANGUP
+| |
+| +-- Update failure or missing status_text
+|   |
+|   v
+|   [S] TICKET_STATUS_ERROR
+|   |
+|   v
+|   [T] HANGUP
 |
-+-- New question, or no tickets to present
-|
-v
-[P] FAQ_SHORT
++-- The caller wants to ask a new question
+| |
+| v
+| [P] FAQ_SHORT
 |
 | MCP: list_topics
 | The model selects a covered topic.
@@ -1029,10 +1058,22 @@ Initialization and context, written by the backend:
 - greeting_text: string
 - operation_id: opaque string for this ticket creation; derived from stable
   phone call context or the web initialization event id, never a random fallback
+- selected_ticket_status_text: string. The backend is the initial writer when
+  exactly one ticket is presented, so the deterministic
+  selected_ticket_status_text != "" comparison bypasses TICKET_SELECTION's model
+  turn and routes directly to TICKET_STATUS. With zero presented tickets the
+  value is empty and MAIN_ROUTING routes to FAQ, so no ticket menu is read. With
+  multiple presented tickets the value is empty and TICKET_SELECTION reads the
+  menu and the caller chooses a ticket. Empty by default and on every read
+  failure.
 
 Variables written by Update Dynamic Variables:
 
-- selected_ticket_status_text: string
+- selected_ticket_status_text: string. Still writable for the multi-ticket path:
+  when more than one ticket is presented, the caller selects a ticket and the
+  updater copies that ticket's exact backend status_text. The backend's initial
+  prefill never widens tool permissions; it only short-circuits the single-ticket
+  case deterministically.
 - ticket_subject: string
 - ticket_description: string
 
@@ -1049,6 +1090,7 @@ Default values:
 - tickets_json = "[]"
 - technician_available = false
 - greeting_text = generic greeting
+- selected_ticket_status_text = ""
 - Other strings are empty.
 
 These values allow a comprehensible conversation even if
@@ -1062,6 +1104,16 @@ Update Dynamic Variables must not be able to modify:
 - can_create_ticket.
 - operation_id.
 - Creation identifiers returned by the backend.
+
+Sequence rule for selected_ticket_status_text: the backend's prefill only runs
+after successful dependency reads and only when exactly one ticket remains
+after presentTickets has filtered, sorted, and limited the list. It does not
+depend on can_create_ticket, so callers without creation context still get
+their single existing ticket announced through the deterministic edge. The
+old combined ORIENTATION node shared its status comparison with intent-like
+edges on a single node; the prefill is unsafe there and requires the split
+MAIN_ROUTING + TICKET_SELECTION workflow so the intent decision is never
+bypassed by a filled status variable.
 
   4.3. Ticket model
 
@@ -2096,7 +2148,7 @@ Title: Update a Phone Number
 URL: https://developers.telnyx.com/api-reference/phone-number-configurations/update-a-phone-number
 Purpose: assigning the number to the application.
 
-## STEP 11. ADD ORIENTATION AND TICKET FOLLOW-UP
+## STEP 11. ADD MAIN_ROUTING, TICKET_SELECTION AND TICKET FOLLOW-UP
 
 Objective:
 Personalize the greeting and read an existing ticket.
@@ -2106,34 +2158,48 @@ Tasks:
 1. Load web_call fixtures for the backend demo identity to test from the Portal.
    Load phone_call fixtures separately for the privately configured test number
    when validating the real phone path. These identities remain independent.
-2. Add ORIENTATION and TICKET_STATUS.
-3. ORIENTATION:
-   - If init_ok and tickets_count > 0, present the tickets.
-   - Number them verbally.
-   - Allow selection by number or subject.
+2. Add MAIN_ROUTING, TICKET_SELECTION and TICKET_STATUS. The old combined
+   ORIENTATION node is split into two focused nodes; the branch is fixed by
+   MAIN_ROUTING and TICKET_SELECTION may clarify, cancel, or fail only.
+3. MAIN_ROUTING:
+   - Decide the caller's intent right after the greeting.
+   - Own no business tools; only Telnyx's outgoing LLM transition tools.
+   - Route a new question to FAQ_SHORT, a follow-up to TICKET_SELECTION, and a
+     cancellation to GOODBYE.
+4. TICKET_SELECTION:
+   - After the caller chooses follow-up in MAIN_ROUTING, select the ticket here.
+   - For exactly one presented ticket, /init already prefills
+     selected_ticket_status_text, so the nonempty-status comparison bypasses
+     this node's model turn and routes directly to TICKET_STATUS.
+   - Otherwise read the ticket list verbally and number it.
+   - Allow selection by list number, reference, or subject.
    - Ask for clarification if several tickets match.
-   - Allow a new question.
+   - Never route back to FAQ or main routing; no change-of-mind instruction.
 
-4. Before TICKET_STATUS:
+5. Before TICKET_STATUS (multiple-ticket path only):
    - Call SET_SUPPORT_VARIABLES.
    - Copy the known status into selected_ticket_status_text.
    - Copy the backend-provided status_text verbatim, including reference/status.
    - Wait for this update to succeed.
    - Only then follow the transition.
+   - The updater is needed only when more than one ticket is presented. For
+     exactly one presented ticket, /init prepares selected_ticket_status_text
+     and the existing != "" comparison bypasses the model after follow-up is
+     chosen, so SET_SUPPORT_VARIABLES is not called.
 
-5. TICKET_STATUS:
+6. TICKET_STATUS:
    - Speak {{selected_ticket_status_text}} and the shared goodbye text together.
    - Then HANGUP.
 
-6. If no ticket is available:
-   - Move to the new-question branch.
+7. If no ticket is available:
+   - MAIN_ROUTING routes to the new-question branch (FAQ_SHORT).
 
-7. If init_ok = false:
+8. If init_ok = false:
    - Briefly explain that tickets could not be retrieved.
    - Allow a new question.
    - Do not announce that the caller's records are empty.
 
-8. Provide npm run resetactor for explicit test administration:
+9. Provide npm run resetactor for explicit test administration:
    - Default target: the backend Portal demo identity.
    - --phone requires a caller number in ignored reset-actor.local.json.
    - Authenticate POST /admin/reset-actor with the existing admin secret.
@@ -2146,26 +2212,53 @@ Implementation for step 11:
 
 - /init adds a backend-formatted status_text to each presented ticket. Stored
   ticket records do not change format. Copy the whole text, including reference,
-  status label and progress summary, through SET_SUPPORT_VARIABLES.
-- config/workflow.ts defines GREETING -> ORIENTATION, then ticket status,
-  new-question conversation, cancellation or a status-preparation error. Failed
-  initialization routes to an unavailable Speak message before conversation;
-  successful initialization with no tickets routes directly to conversation.
-  The status Speak reads selected_ticket_status_text plus the shared goodbye
-  in one message and continues directly to hangup. The status-error Speak also
-  includes the goodbye and goes directly to hangup. Other branches keep GOODBYE.
-  This avoids the observed two-Speak audio issue: the transcript included both
-  texts, but only one playback occurred before hangup, even with the mic off.
-  Live verification of the combined message is still required after deployment.
-  Ambiguous/out-of-range choices remain in the orientation prompt.
-- Expression guards use Telnyx's documented AST and keep their priority:
-  init_ok=false, tickets_count=0, then nonempty selected_ticket_status_text.
+  status label and progress summary, through SET_SUPPORT_VARIABLES. /init also
+  prefills selected_ticket_status_text when exactly one ticket remains after
+  presentTickets has filtered, sorted, and limited the list, so the deterministic
+  selected_ticket_status_text != "" comparison can bypass TICKET_SELECTION's
+  model turn and route directly to TICKET_STATUS. The count, tickets_json, and
+  this prefill are derived from the same presented array; no extra Actor/KV
+  call, model turn, storage write, or invented status is involved. With zero
+  presented tickets the prefill stays empty and MAIN_ROUTING routes to FAQ, so no
+  ticket menu is read. With multiple presented tickets the prefill stays empty
+  and TICKET_SELECTION reads the menu and the caller chooses a ticket. The
+  prefill only depends on
+  successful reads and exactly one presented ticket, never on can_create_ticket,
+  so callers without creation context still get their single existing ticket
+  announced through the deterministic edge. The old combined ORIENTATION node
+  shared its status comparison with intent-like edges on a single node; the
+  prefill is unsafe there and requires the split MAIN_ROUTING + TICKET_SELECTION
+  workflow so the intent decision is never bypassed by a filled status variable.
+- config/workflow.ts defines GREETING -> MAIN_ROUTING, then the intent decision
+  to TICKET_SELECTION (follow-up), FAQ_SHORT (new question) or GOODBYE (cancel).
+  TICKET_SELECTION then routes to ticket status, cancellation or a
+  status-preparation error. Failed initialization routes to an unavailable Speak
+  message before conversation; successful initialization with no tickets routes
+  directly to FAQ_SHORT. The status Speak reads selected_ticket_status_text plus
+  the shared goodbye in one message and continues directly to hangup. The
+  status-error Speak also includes the goodbye and goes directly to hangup.
+  Other branches keep GOODBYE. This avoids the observed two-Speak audio issue:
+  the transcript included both texts, but only one playback occurred before
+  hangup, even with the mic off. Live verification of the combined message is
+  still required after deployment. Ambiguous/out-of-range choices remain in the
+  ticket_selection prompt; MAIN_ROUTING never reads the ticket list. The
+  single-ticket clause was removed from TICKET_SELECTION's prompt because the
+  backend prefill, not a model instruction, now owns the single-ticket bypass.
+- Expression guards use Telnyx's documented AST and keep their priority. On
+  MAIN_ROUTING: init_ok=false, then tickets_count=0; they preempt the model turn.
+  On TICKET_SELECTION: the nonempty selected_ticket_status_text comparison is the
+  only deterministic guard. A filled status variable never skips MAIN_ROUTING's
+  intent decision; the status comparison belongs to selection only.
   scripts/lib/assistant.ts preserves that per-source order in read-back checks;
   node canvas order is immaterial. Never treat guard reordering as equivalent.
-- Attach the existing shared updater and hangup ids. Only ORIENTATION exposes
-  the updater; only selected_ticket_status_text should be written in this step.
-  Check the exact three-variable library allowlist on GET and never resend merged
-  shared definitions inline. tools_mode stays replace; instructions_mode append.
+- Attach the existing shared updater and hangup ids. Only TICKET_SELECTION
+  exposes the updater; MAIN_ROUTING has no business tools. Only
+  selected_ticket_status_text should be written in this step. Check the exact
+  three-variable library allowlist on GET and never resend merged shared
+  definitions inline. tools_mode stays replace; instructions_mode append.
+  selected_ticket_status_text stays in the writable allowlist because the
+  multi-ticket path still uses SET_SUPPORT_VARIABLES; the backend's initial
+  prefill never widens tool permissions.
 - scripts/reset-actor.ts reads the Function URL from ignored deployment state
   and the existing admin secret from the environment. It runs no ship or seed.
   Unknown flags stop rather than selecting a default reset. Phone targets stay
@@ -2173,10 +2266,15 @@ Implementation for step 11:
 - Backend admin helpers in src/http/common.ts and local scripts/lib/admin-http.ts
   are reused by seed/reset. The protected reset route calls resetTickets in one
   serialized Actor turn and announces success only after a successful deletion.
-- docs/test-tickets.md gives the short deploy/reset/seed/Portal sequence. Local
-  tests cover safe reset, instance isolation, failure preservation, counter restart,
-  status formatting and updater/graph reconciliation. They do not run the hosted
-  model or prove conversational selection. Joel performs the Portal smoke test
+- docs/test-tickets.md gives the short deploy/reset/seed/Portal sequence and the
+  split smoke checks (no tickets, one ticket + follow-up without menu, one ticket
+  + new question without menu, multiple tickets + menu, ambiguity, cancellation).
+  Local tests cover safe reset, instance isolation, failure preservation, counter
+  restart, status formatting, the MAIN_ROUTING/TICKET_SELECTION split, the
+  updater-only selection and updater-free main routing, and an offline
+  reconciliation check that an old 15-node ORIENTATION graph is updated to the
+  16-node split on the same assistant id. They do not run the hosted model or
+  prove conversational selection. Joel performs the Portal smoke test
   after deployment; real physical calls remain blocked by the account's D61.
 
 - Seeding uses npm run seedticketsweb or npm run seedticketsphone -- <E164_PHONE>,
@@ -2790,7 +2888,7 @@ Requirement Implementation
 ---
 
 Telnyx assistant Assistant configured through the API
-Multi-node workflow Orientation, FAQ, ticket, and transfer
+Multi-node workflow Main routing, ticket selection, FAQ, ticket, and transfer
 Prompt nodes Intent and information collection
 Speak node Greeting and deterministic messages
 Conditional edges Intent, flag, and creation result

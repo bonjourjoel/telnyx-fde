@@ -123,7 +123,10 @@ export interface SeedDemoTicketsResult {
 // ---------------------------------------------------------------------------
 
 // Keys written by the POST /init webhook. These shape the conversation from
-// the very first node; defaults are used when /init cannot be reached.
+// the very first node; defaults are used when /init cannot be reached. The
+// backend is the initial writer of selected_ticket_status_text when exactly one
+// ticket is presented, while SET_SUPPORT_VARIABLES still writes it back when the
+// caller selects a ticket from a multi-ticket menu; see WRITABLE_DYNAMIC_VARIABLE_KEYS.
 export const INIT_DYNAMIC_VARIABLE_KEYS = [
   "init_ok",
   "can_create_ticket",
@@ -132,12 +135,16 @@ export const INIT_DYNAMIC_VARIABLE_KEYS = [
   "technician_available",
   "greeting_text",
   "operation_id",
+  "selected_ticket_status_text",
 ] as const;
 export type InitDynamicVariableKey = (typeof INIT_DYNAMIC_VARIABLE_KEYS)[number];
 
 // Keys the SET_SUPPORT_VARIABLES shared tool may write back mid-conversation.
 // This list is the source of truth for the allowlist enforced in step 8;
 // identity, flags, and creation identifiers must never be writable from here.
+// selected_ticket_status_text stays writable even though the backend also
+// writes it initially for one presented ticket: a multi-ticket menu selection
+// still requires the tool to copy the chosen ticket's status_text.
 export const WRITABLE_DYNAMIC_VARIABLE_KEYS = [
   "selected_ticket_status_text",
   "ticket_subject",
@@ -176,6 +183,13 @@ export interface InitDynamicVariables {
   // Opaque key tying this call's ticket creation to a single idempotent Actor
   // operation. Generated from the stable call context in step 6.
   operation_id: string;
+  // Backend-formatted status message for a single presented ticket. The
+  // backend is the initial writer when exactly one ticket is presented so the
+  // deterministic selected_ticket_status_text != "" comparison can bypass
+  // TICKET_SELECTION's model turn; SET_SUPPORT_VARIABLES writes it back when
+  // the caller selects a ticket from a multi-ticket menu. Empty by default and
+  // whenever zero or multiple tickets are presented, leaving the model to act.
+  selected_ticket_status_text: string;
 }
 
 // Fallback values used when /init fails or is unreachable. They are also the
@@ -191,6 +205,7 @@ export const DEFAULT_INIT_DYNAMIC_VARIABLES: InitDynamicVariables = {
   greeting_text:
     "Hello, this is the Telnyx developer support line. How can I help you today?",
   operation_id: "",
+  selected_ticket_status_text: "",
 };
 
 // Subset of a Ticket exposed in tickets_json, after pruning fields that must

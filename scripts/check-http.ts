@@ -123,12 +123,16 @@ function seedRequest(tickets: unknown, adminSecret = secrets.admin_secret!): Req
 }
 
 // Decode the explicit initialization wrapper and assert its full primitive shape.
+// The single-ticket prefill of selected_ticket_status_text is always present as
+// a string: empty for zero/multiple presented tickets and default/error paths,
+// or the sole presented ticket's exact backend status_text for exactly one.
 async function variables(response: Response): Promise<InitDynamicVariables> {
   assert.equal(response.status, 200);
   const body = await response.json() as { dynamic_variables: InitDynamicVariables };
   assert.equal(typeof body.dynamic_variables.init_ok, "boolean");
   assert.equal(typeof body.dynamic_variables.can_create_ticket, "boolean");
   assert.equal(typeof body.dynamic_variables.tickets_count, "number");
+  assert.equal(typeof body.dynamic_variables.selected_ticket_status_text, "string");
   return body.dynamic_variables;
 }
 
@@ -154,7 +158,12 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       const system = new System();
       for (const path of ["/init", "/tickets/create"]) {
         const unsigned = new Request("https://local.invalid" + path, { method: "POST", body: "not-json" });
-        assert.equal((await routeRequest(unsigned, system.env, secrets)).status, 401);
+        const unsignedResponse = await routeRequest(unsigned, system.env, secrets);
+        assert.equal(unsignedResponse.status, 401);
+        if (path === "/init") {
+          const body = await unsignedResponse.json() as { dynamic_variables: { selected_ticket_status_text: string } };
+          assert.equal(body.dynamic_variables.selected_ticket_status_text, "");
+        }
         const old = signedRequest(path, {}, String(Math.floor(Date.now() / 1000) - 600));
         assert.equal((await routeRequest(old, system.env, secrets)).status, 401);
         const valid = signedRequest(path, {});
@@ -174,6 +183,8 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.equal(first.can_create_ticket, true);
       assert.equal(first.tickets_json, "[]");
       assert.equal(first.tickets_count, 0);
+      // Zero presented tickets: the prefill stays blank through the shared default.
+      assert.equal(first.selected_ticket_status_text, "");
       assert.equal(first.technician_available, false);
       assert.match(first.operation_id, /^[a-f0-9]{64}$/);
       const retry = initialization();
@@ -199,11 +210,17 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
         "Ticket T-0003 is open. Synthetic progress.", "Ticket T-0004 is in progress. Synthetic progress.",
         "Ticket T-0005 is resolved. Synthetic progress.",
       ]);
+      // Three tickets presented: the prefill stays blank and the model reads the menu.
+      assert.equal(value.selected_ticket_status_text, "");
       assert.match(value.greeting_text, /3 recent or open tickets/);
       assert.equal((await [...system.actors.values()][0].listTickets()).length, 5);
       const oldOnly = new System();
       await routeRequest(seedRequest([fixture("old-open", 60), fixture("old-resolved", 60, "resolved")]), oldOnly.env, secrets);
-      assert.equal((await variables(await routeRequest(signedRequest("/init", initialization()), oldOnly.env, secrets))).tickets_count, 1);
+      // One presented ticket out of multiple stored records after filtering: the
+      // prefill equals the sole presented ticket's exact backend status_text.
+      const oldInitial = await variables(await routeRequest(signedRequest("/init", initialization()), oldOnly.env, secrets));
+      assert.equal(oldInitial.tickets_count, 1);
+      assert.equal(oldInitial.selected_ticket_status_text, "Ticket T-0001 is open. Synthetic progress.");
     });
 
     await t.test("dependency failures produce generic initialization, never empty-record claims", async () => {
@@ -218,6 +235,8 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
         assert.equal(value.can_create_ticket, false);
         assert.equal(value.technician_available, false);
         assert.equal(value.operation_id, "");
+        // Failed reads keep the shared default; the safe default is never a status claim.
+        assert.equal(value.selected_ticket_status_text, "");
         assert.doesNotMatch(value.greeting_text, /no tickets|0 tickets/i);
       }
     });
@@ -228,13 +247,21 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
         const value = await variables(await routeRequest(signedRequest("/init", initialization(phone)), system.env, secrets));
         assert.equal(value.init_ok, false);
         assert.equal(value.can_create_ticket, false);
+        // Identity failure returns safe defaults; no status is announced for an
+        // unsupported identity.
+        assert.equal(value.selected_ticket_status_text, "");
         assert.equal(system.actorKeys.length, 0);
       }
       const system = new System();
+      // Seed one synthetic fixture so the single-ticket shortcut is exercised
+      // even without call_control_id: /init prefills the status text.
+      assert.equal((await routeRequest(seedRequest([fixture("missing-call-context-ticket")]), system.env, secrets)).status, 200);
       const value = await variables(await routeRequest(signedRequest("/init", initialization(PHONE, null)), system.env, secrets));
       assert.equal(value.init_ok, true);
       assert.equal(value.can_create_ticket, false);
       assert.equal(value.operation_id, "");
+      assert.equal(value.tickets_count, 1);
+      assert.equal(value.selected_ticket_status_text, "Ticket T-0001 is open. Synthetic progress.");
       assert.equal((await routeRequest(signedRequest("/init", {}), system.env, secrets)).status, 400);
     });
 
@@ -251,6 +278,10 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       const next = await variables(await routeRequest(signedRequest("/init", initialization(PHONE, "v3:next-call")), system.env, secrets));
       assert.equal(next.tickets_count, 1);
       assert.equal(JSON.parse(next.tickets_json)[0].id, result.ticket_id);
+      // Phone caller with exactly one presented ticket: the backend prefills the
+      // status text so TICKET_SELECTION's deterministic comparison bypasses its
+      // model turn.
+      assert.equal(next.selected_ticket_status_text, "Ticket T-0001 is open. Awaiting handling.");
       assert.equal(new Set(system.actorKeys).size, 1);
     });
 
@@ -350,6 +381,10 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       const first = await variables(await routeRequest(signedRequest("/init", event), system.env, secrets));
       assert.equal(first.init_ok, true);
       assert.equal(first.tickets_count, 1);
+      // Portal demo identity with exactly one presented ticket: the backend
+      // prefills its status text so the deterministic comparison bypasses the
+      // selection model turn, while creation remains enabled with a stable id.
+      assert.equal(first.selected_ticket_status_text, "Ticket T-0001 is open. Synthetic progress.");
       assert.equal(first.can_create_ticket, true);
       const create = { ...creation(first.operation_id), caller_phone: target };
       const created = await (await routeRequest(signedRequest("/tickets/create", create), system.env, secrets)).json();
@@ -357,17 +392,29 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.deepEqual(repeated, created);
       const replay = await variables(await routeRequest(signedRequest("/init", event), system.env, secrets));
       assert.equal(replay.operation_id, first.operation_id);
+      // After creation, the demo Actor now holds two presented tickets, so the
+      // prefill stays blank even when replaying the original event: the
+      // single-ticket shortcut tracks the current presented list, not the
+      // replayed event id, and only one presented ticket prefills the status.
+      assert.equal(replay.tickets_count, 2);
+      assert.equal(replay.selected_ticket_status_text, "");
       event.data.id = "another-private-portal-event";
       const next = await variables(await routeRequest(signedRequest("/init", event), system.env, secrets));
       assert.notEqual(next.operation_id, first.operation_id);
       assert.equal(next.tickets_count, 2);
+      // Two tickets presented: the prefill stays blank and the model reads the menu.
+      assert.equal(next.selected_ticket_status_text, "");
       const web = await variables(await routeRequest(signedRequest("/init", webInitialization()), system.env, secrets));
       assert.equal(web.tickets_count, 2);
+      assert.equal(web.selected_ticket_status_text, "");
       assert.equal(new Set(system.actorKeys).size, 1);
       delete (event.data as { id?: string }).id;
       const missing = await variables(await routeRequest(signedRequest("/init", event), system.env, secrets));
       assert.equal(missing.init_ok, true);
       assert.equal(missing.can_create_ticket, false);
+      // Two tickets presented even without an event id, so follow-up still works
+      // and the prefill stays blank; the read does not depend on an operation id.
+      assert.equal(missing.selected_ticket_status_text, "");
     });
 
     await t.test("Portal opt-in never replaces valid phones or accepts other anonymous targets", async () => {
@@ -397,6 +444,9 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.equal(first.init_ok, true);
       assert.equal(first.can_create_ticket, true);
       assert.equal(first.tickets_count, 1);
+      // Web demo identity with exactly one presented ticket: the backend prefills
+      // its status text so the deterministic comparison bypasses the model turn.
+      assert.equal(first.selected_ticket_status_text, "Ticket T-0001 is open. Synthetic progress.");
       assert.match(first.operation_id, /^[a-f0-9]{64}$/);
       const create = { ...creation(first.operation_id), conversation_channel: "web_call",
         caller_phone: "not-a-phone", web_demo_identity: "another-request-identity" };
@@ -406,6 +456,10 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.equal(ticket.ticket_reference, "T-0002");
       const replayInit = await variables(await routeRequest(signedRequest("/init", webInitialization()), system.env, secrets));
       assert.equal(replayInit.operation_id, first.operation_id);
+      assert.equal(replayInit.tickets_count, 2);
+      // Two tickets presented after creation: the prefill stays blank and the
+      // model reads the menu; the caller's choice is copied through the updater.
+      assert.equal(replayInit.selected_ticket_status_text, "");
       const replayCreate = await routeRequest(signedRequest("/tickets/create", create), system.env, secrets);
       assert.deepEqual(await replayCreate.json(), ticket);
       const next = webInitialization("synthetic-private-web-event-2");
@@ -413,6 +467,7 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       const nextVariables = await variables(await routeRequest(signedRequest("/init", next), system.env, secrets));
       assert.equal(nextVariables.tickets_count, 2);
       assert.notEqual(nextVariables.operation_id, first.operation_id);
+      assert.equal(nextVariables.selected_ticket_status_text, "");
       assert.equal(new Set(system.actorKeys).size, 1);
       const nextCreate = await routeRequest(signedRequest("/tickets/create", {
         ...creation(nextVariables.operation_id), conversation_channel: "web_call", caller_phone: undefined,
@@ -421,6 +476,7 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       assert.deepEqual(await (await routeRequest(webSeed(), system.env, secrets)).json(), { added_count: 0 });
       const phone = await variables(await routeRequest(signedRequest("/init", initialization()), system.env, secrets));
       assert.equal(phone.tickets_count, 0);
+      assert.equal(phone.selected_ticket_status_text, "");
       assert.equal(new Set(system.actorKeys).size, 2);
     });
 
@@ -437,6 +493,11 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
         assert.equal(value.init_ok, true);
         assert.equal(value.tickets_count, 1);
         assert.equal(value.can_create_ticket, false);
+        // Missing-operation case with a real synthetic single ticket:
+        // init_ok=true, can_create_ticket=false, status STILL prefilled.
+        // Follow-up is preserved; creation is disabled without dropping the
+        // deterministic status bypass for the one presented ticket.
+        assert.equal(value.selected_ticket_status_text, "Ticket T-0001 is open. Awaiting handling.");
         assert.equal(value.operation_id, "");
         assert.equal((await routeRequest(signedRequest("/tickets/create", {
           ...creation(value.operation_id), conversation_channel: "web_call",
@@ -456,6 +517,9 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
         const value = await variables(await routeRequest(signedRequest("/init", webInitialization()), system.env, secrets));
         assert.equal(value.init_ok, false);
         assert.equal(value.can_create_ticket, false);
+        // Missing or invalid demo configuration keeps the safe default; no status
+        // is announced when the web demo identity cannot be resolved.
+        assert.equal(value.selected_ticket_status_text, "");
         const request = { ...creation(), conversation_channel: "web_call" };
         assert.equal((await routeRequest(signedRequest("/tickets/create", request), system.env, secrets)).status, 503);
         const seed = new Request("https://local.invalid/admin/seed", { method: "POST",
@@ -534,6 +598,11 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       await routeRequest(webSeed, system.env, secrets);
       const demoBefore = await variables(await routeRequest(signedRequest("/init", initialization(target)), system.env, secrets));
       assert.equal(demoBefore.tickets_count, 1);
+      // Pre-reset, the demo Actor presents exactly one ticket, so the backend
+      // prefills its status text and the deterministic comparison bypasses the
+      // model turn. The single-ticket shortcut tracks the presented list, not
+      // the stored records, so it survives across Portal smoke calls.
+      assert.equal(demoBefore.selected_ticket_status_text, "Ticket T-0001 is open. Synthetic progress.");
       const reset = (body: unknown, admin = secrets.admin_secret) => new Request("https://local.invalid/admin/reset-actor", { method: "POST",
         headers: { "Content-Type": "application/json", ...(admin ? { "x-admin-secret": admin } : {}) }, body: JSON.stringify(body) });
       assert.equal((await routeRequest(reset({ conversation_channel: "web_call" }, "wrong-secret"), system.env, secrets)).status, 401);
@@ -548,8 +617,13 @@ test("local HTTP scenarios and sanitized observability", async (t) => {
       }
       const demoAfter = await variables(await routeRequest(signedRequest("/init", initialization(target)), system.env, secrets));
       assert.equal(demoAfter.tickets_count, 0); assert.equal(demoAfter.init_ok, true);
+      // Post-reset, the demo Actor presents zero tickets: the prefill stays blank.
+      assert.equal(demoAfter.selected_ticket_status_text, "");
       const phoneAfter = await variables(await routeRequest(signedRequest("/init", initialization()), system.env, secrets));
       assert.equal(phoneAfter.tickets_count, 1);
+      // The phone caller was not reset; its single presented ticket keeps the
+      // deterministic single-ticket shortcut intact, independent of the web demo.
+      assert.equal(phoneAfter.selected_ticket_status_text, "Ticket T-0001 is open. Synthetic progress.");
       const created = await routeRequest(signedRequest("/tickets/create", { ...creation(demoAfter.operation_id), caller_phone: target }), system.env, secrets);
       assert.equal((await created.json()).ticket_reference, "T-0001");
       const demoKey = system.actorKeys.at(-1)!;
