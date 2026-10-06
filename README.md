@@ -11,7 +11,8 @@ Joël Abenhaïm - Telnyx developer support line
 5. [Software architecture](#architecture)
 6. [Observability](#observability) and [sample bug fix story](#observability---one-thing-that-broke-during-development-and-how-i-found-it)
 7. [Demo script](#demo-script)
-8. [Testing instructions](#testing-instructions)
+8. [Demo video](#demo-video)
+9. [Testing instructions](#testing-instructions)
 
 ## Setup instructions
 
@@ -475,6 +476,10 @@ telnyx-edge logs telnyx-fde --type runtime --since 10m --last 200
 Write-Host "Telnyx metrics"
 telnyx-edge metrics telnyx-fde --since 1h --json
 ```
+
+## Demo video
+
+[Download the demo video ./telnyxdevsupport-demo-video.mp4 (5mn - 59MB)](./telnyxdevsupport-demo-video.mp4)
 
 ## Testing instructions
 
