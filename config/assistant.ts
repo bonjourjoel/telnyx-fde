@@ -22,6 +22,11 @@ export interface AssistantDefinition {
   enabled_features: string[];
   voice_settings: { voice: string };
   transcription: { model: string; language: string };
+  // Assistant-wide silence re-engagement. user_idle_reply_secs sets how long the
+  // caller can stay silent before the assistant gently prompts them again. It is
+  // scoped to the whole telephony assistant, not a per-node transition timer,
+  // and it is distinct from user_idle_timeout_secs which stops the assistant.
+  telephony_settings: { user_idle_reply_secs: number };
   dynamic_variables_webhook_url: string; dynamic_variables_webhook_timeout_ms: number;
   dynamic_variables: Record<string, string | number | boolean>;
   mcp_servers: { id: string; allowed_tools: string[] }[];
@@ -51,6 +56,9 @@ export function buildAssistant(functionUrl: string, projectName: string, mcpId: 
     name: projectName + "-support", model: ASSISTANT_MODEL, instructions: ASSISTANT_INSTRUCTIONS,
     greeting: "", enabled_features: ["telephony"], voice_settings: { voice: ASSISTANT_VOICE },
     transcription: { ...ASSISTANT_TRANSCRIPTION },
+    // Re-engage callers after 3 seconds of silence instead of the Telnyx
+    // 10-second default. Owned assistant-wide setting; see AssistantDefinition.
+    telephony_settings: { user_idle_reply_secs: 3 },
     dynamic_variables_webhook_url: new URL("/init", base).href,
     dynamic_variables_webhook_timeout_ms: INIT_WEBHOOK_TIMEOUT_MS, dynamic_variables: defaultVariables(),
     mcp_servers: [{ id: mcpId, allowed_tools: [...FAQ_TOOL_NAMES] }], tool_ids: [tools.set_support_variables], tools: [],

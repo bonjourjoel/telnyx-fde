@@ -67,7 +67,10 @@ class Registry implements ResourceApi {
       tools: [{ type: "update_dynamic_variables", shared: true, update_dynamic_variables: { name: "SET_SUPPORT_VARIABLES",
           description: "Update only the listed support conversation inputs.", updatable_variables: WRITABLE_DYNAMIC_VARIABLE_KEYS.map(name => ({ name, type: "string" })) } }],
       external_llm: null, llm_api_key_ref: null,
-      telephony_settings: { default_texml_app_id: "texml-auto-example" },
+      // Mirror the request's owned telephony_settings so a malformed or missing
+      // owned field is visible to reconciliation, then add the server-created
+      // default TeXML app. Hardcoding the seconds here would conceal request defects.
+      telephony_settings: { ...(body.telephony_settings as object), default_texml_app_id: "texml-auto-example" },
       conversation_flow: { ...DEFINITION.conversation_flow,
         ...(body.conversation_flow as object),
         nodes: (body.conversation_flow as typeof DEFINITION.conversation_flow).nodes.map((node) =>
@@ -475,6 +478,50 @@ test("two deployments reuse one assistant and preserve previous ids and auto TeX
   assert.equal(store.state.kv_namespace_id, "kv-existing");
   assert.equal(store.state.mcp_server_id, "mcp-example");
   assert.equal(store.state.untouched, true);
+});
+
+// user_idle_reply_secs is the assistant-wide silence re-engagement timer. It is
+// owned configuration: an existing assistant with a missing or stale value is
+// repaired to 3 through one POST on the same id, the request body includes only
+// the owned seconds (never the server-added default_texml_app_id), and a re-run
+// with the corrected value reuses the id without another write.
+test("telephony_settings.user_idle_reply_secs is owned and reconciled on the same assistant", async () => {
+  const store = new Store(); const api = new Registry(store);
+  const first = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(first.action, "created");
+  // The create request body carries only the owned silence field, not the
+  // auto-created default_texml_app_id that Telnyx adds on its own.
+  const createCall = api.calls.find((call) => call.method === "POST" && call.path === "/ai/assistants")!;
+  assert.deepEqual((createCall.body as typeof DEFINITION).telephony_settings, { user_idle_reply_secs: 3 });
+  // The previously configured 2-second value drifts
+  // and is repaired on the same id; the update body still excludes default_texml_app_id.
+  let stored = api.items.get(first.resource.id)!;
+  (stored.telephony_settings as { default_texml_app_id: string; user_idle_reply_secs: number }).user_idle_reply_secs = 2;
+  const second = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(second.action, "updated");
+  assert.equal(second.resource.id, first.resource.id);
+  const updateCall = api.calls.find((call) => call.method === "POST" && call.path === "/ai/assistants/" + first.resource.id)!;
+  assert.deepEqual((updateCall.body as typeof DEFINITION).telephony_settings, { user_idle_reply_secs: 3 });
+  // A re-run once the stored value matches the desired one reuses the same id.
+  const third = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(third.action, "reused");
+  assert.equal(third.resource.id, first.resource.id);
+  // A missing timer (an assistant created before this owned field existed) is
+  // also repaired to 3 on the same id.
+  stored = api.items.get(first.resource.id)!;
+  const telephony = stored.telephony_settings as { default_texml_app_id: string; user_idle_reply_secs?: number };
+  delete telephony.user_idle_reply_secs;
+  const fourth = await upsertAssistant(api, store, DEFINITION);
+  assert.equal(fourth.action, "updated");
+  assert.equal(fourth.resource.id, first.resource.id);
+  // Extra server metadata (default_texml_app_id) remains tolerated after the
+  // repairs and the final stored timer matches the owned setting. Only one
+  // creation POST happened across the whole scenario; updates reuse the id.
+  const finalStored = api.items.get(first.resource.id)!;
+  assert.equal((finalStored.telephony_settings as Record<string, unknown>).default_texml_app_id, "texml-auto-example");
+  assert.equal((finalStored.telephony_settings as Record<string, unknown>).user_idle_reply_secs, 3);
+  assert.equal(api.items.size, 1);
+  assert.equal(api.calls.filter((call) => call.method === "POST" && call.path === "/ai/assistants").length, 1);
 });
 
 // Shared response definitions remain read-only; one missing or unsafe updater
