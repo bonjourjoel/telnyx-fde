@@ -54,7 +54,34 @@ Subsequent deployments reuse existing resources and preserve tickets, feature fl
 
 ## Architecture
 
-### Architecture - List of nodes (overview)
+### Architecture - Overview
+
+```text
+Caller (phone or Portal voice test)
+                |
+                v
+     Telnyx Assistant / Workflow
+                |
+      /init, /tickets/create, /mcp
+                |
+                v
+    Single TypeScript Edge Function
+                |
+                +--> KV: backend configuration
+                |
+                +--> CallerTickets Actor
+                |         |
+                |         v
+                |    Persistent tickets
+                |
+                +--> MCP server: FAQ catalogue
+```
+
+The Telnyx assistant manages the conversation through its workflow. A single Edge Function provides initialization, ticket creation, and the custom MCP server.
+
+KV stores backend configuration. The Actor persists tickets and serializes modifications to prevent concurrent updates from losing data. The MCP server exposes three tools for reading the public documentation catalogue.
+
+### Architecture - List of nodes
 
 - GREETING: Speak
 - MAIN_ROUTING: Prompt
@@ -330,7 +357,7 @@ It's a very efficient way to debug the application.
 **Method 1: Check Function availability**
 
 ```powershell
-Invoke-WebRequest -Uri "<FUNCTION_URL>/health" -TimeoutSec 5
+Invoke-WebRequest -Uri "https://telnyx-fde-0768c5c4-b.telnyxcompute.com/health" -TimeoutSec 5
 ```
 
 This checks availability, not business dependencies.
@@ -338,7 +365,7 @@ This checks availability, not business dependencies.
 **Method 2: Filter runtime error messages**
 
 ```powershell
-telnyx-edge logs telnyx-fde-support --tail --type runtime |
+telnyx-edge logs telnyx-fde --tail --type runtime |
     Select-String -Pattern '\berrors?\b|\bfailed\b|\bfailure\b'
 ```
 
@@ -347,7 +374,7 @@ This is a text filter.
 **Method 3: Filter application failures and rejected requests**
 
 ```powershell
-telnyx-edge logs telnyx-fde-support --tail --type runtime |
+telnyx-edge logs telnyx-fde --tail --type runtime |
     Select-String -Pattern '"outcome"\s*:\s*"(error|rejected)"'
 ```
 
@@ -403,7 +430,55 @@ Observed results (summary, not verbatim console output):
 
 ## Demo script
 
+**Introduction**
+
+Demo explanation: I built a voice assistant that simulates Telnyx technical support for developers. This is a demonstration application, not a production service, designed to incorporate all the technical elements required by the challenge.
+
+**Step 1: FAQ question**
+
+Demo explanation: I’ll ask a question covered by the documentation catalogue. The assistant will use our custom MCP server to find the relevant documentation page.
+
+Customer: How do dynamic variables work?
+
+Assistant: Calls list_topics to identify a matching topic, then read_short_answer to retrieve its documentation title. Announces the title, says goodbye, and ends the call.
+
+**Step 2: Ticket creation**
+
+Preparation: Run `npm run technician:false` before starting this voice test so the assistant skips the technician offer.
+
+Demo explanation: I’ll describe a problem outside the FAQ and explicitly agree to ticket creation. The backend will store the ticket in the demo caller’s Stateful Actor.
+
+Customer: My invoice was charged twice.
+
+Assistant: Finds no matching FAQ topic, summarizes the problem, and asks whether to create a support ticket.
+
+Customer: Yes, please create a support ticket.
+
+Assistant: Stores the subject and description using SET_SUPPORT_VARIABLES, then calls CREATE_TICKET. After the backend confirms creation, announces the ticket reference, says goodbye, and ends the call.
+
+**Step 3: Ticket follow-up on a new call**
+
+Demo explanation: I’ll start a new voice test. The initialization webhook retrieves the ticket created in the previous session from the same Stateful Actor and personalizes the greeting.
+
+Assistant: Greets the caller, mentions the existing ticket, and offers ticket follow-up or a new question.
+
+Customer: I’d like to follow up on the ticket about my invoice being charged twice.
+
+Assistant: If only one ticket is presented, announces its status directly. If several tickets are presented, asks which one to follow up on. Reads the selected ticket’s stored status and progress summary, says goodbye, and ends the call.
+
+**Step 4: Print the technical logs**
+
+```powershell
+Write-Host "Recent runtime logs"
+telnyx-edge logs telnyx-fde --type runtime --since 10m --last 200
+
+Write-Host "Telnyx metrics"
+telnyx-edge metrics telnyx-fde --since 1h --json
+```
+
 ## Testing instructions
+
+Public Function URL: [https://telnyx-fde-0768c5c4-b.telnyxcompute.com](https://telnyx-fde-0768c5c4-b.telnyxcompute.com)
 
 Open the [Telnyx Portal](https://portal.telnyx.com/), go to **AI Assistants**, select the project’s assistant, and start the voice test. Access to the assistant in the project’s account is required.
 
@@ -411,4 +486,24 @@ Allow microphone access and speak English. Set microphone input and speaker volu
 
 You can ask a Telnyx documentation question, request ticket creation for a question outside the FAQ, or follow up on an existing ticket in a new session.
 
-**Current phone limitation:** The number has been purchased and connected, but my Telnyx account is still awaiting verification or upgrade. Inbound calls are rejected with SIP 486 / D61 (`USER_BUSY`) and produce a busy tone before reaching the backend. Voice testing is therefore currently available through the Portal only.
+**Public MCP server**
+
+The MCP endpoint is publicly accessible without authentication:
+
+[https://telnyx-fde-0768c5c4-b.telnyxcompute.com/mcp](https://telnyx-fde-0768c5c4-b.telnyxcompute.com/mcp)
+
+Connect using an MCP client supporting **Streamable HTTP**. The server exposes three tools: `list_topics`, `read_short_answer`, and `read_long_answer`.
+
+To test them using the project's official MCP SDK client, run from the repository root after installing dependencies:
+
+```powershell
+node --import tsx scripts/check-mcp.ts --url https://telnyx-fde-0768c5c4-b.telnyxcompute.com/mcp
+```
+
+The script discovers and calls all three tools, and checks invalid inputs.
+
+**Current phone limitation**
+
+Configured phone number: `+33221857507`.
+
+The number has been purchased and connected, but my Telnyx account is still awaiting verification or upgrade. Inbound calls are rejected with SIP 486 / D61 (`USER_BUSY`) and produce a busy tone before reaching the backend. Voice testing is therefore currently available through the Portal only.
